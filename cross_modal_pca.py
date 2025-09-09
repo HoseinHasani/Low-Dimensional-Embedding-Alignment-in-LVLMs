@@ -1,0 +1,89 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import normalize
+from sklearn.metrics.pairwise import cosine_similarity
+from sklearn.decomposition import PCA
+
+use_baseline = False  
+pca_dim = 4  
+
+vis = np.load("data/just_number_L25/visual_row_means_L25.npy")
+txt = np.load("data/just_number_L25/text_fullline_rows_L25.npy")
+
+if use_baseline:
+    vis_baseline = np.load("data/just_number_L25/visual_row_means_L25_baseline.npy")
+    vis = vis - vis_baseline
+
+def clean_array(x):
+    x2 = x.copy()
+    for d in range(x2.shape[1]):
+        col = x2[:, d]
+        if np.isnan(col).any():
+            mean_val = np.nanmean(col)
+            if np.isnan(mean_val):
+                mean_val = 0.0
+            col = np.nan_to_num(col, nan=mean_val)
+        x2[:, d] = col
+    return x2
+
+txt_clean = []
+for n in range(txt.shape[0]):
+    txt_clean.append(clean_array(txt[n].T))
+txt_clean = np.vstack(txt_clean)  # (100*4, 3584)
+
+pca = PCA(n_components=pca_dim)
+pca.fit(txt_clean)
+
+colors = ["red", "blue", "green", "purple"]
+
+txt_proj = []
+vis_proj = []
+all_sims = []
+
+for n in range(vis.shape[0]):
+    txt_emb = clean_array(txt[n].T)
+    vis_emb = clean_array(vis[n].T)
+
+    txt_emb_pca = pca.transform(txt_emb)
+    vis_emb_pca = pca.transform(vis_emb)
+
+    txt_proj.append(txt_emb_pca)
+    vis_proj.append(vis_emb_pca)
+
+    txt_emb_norm = normalize(txt_emb_pca, norm="l2")
+    vis_emb_norm = normalize(vis_emb_pca, norm="l2")
+
+    sim = cosine_similarity(txt_emb_norm, vis_emb_norm)
+    sim = np.where(np.isnan(sim), np.nanmean(sim), sim)
+    all_sims.append(sim)
+
+mean_sim = np.mean(all_sims, axis=0)
+
+plt.figure(figsize=(6,5))
+for i in range(4):
+    xs = [txt_proj[n][i,0] for n in range(len(txt_proj))]
+    ys = [txt_proj[n][i,1] for n in range(len(txt_proj))]
+    plt.scatter(xs, ys, color=colors[i], alpha=0.6, label=f"txt{i+1}")
+plt.title("Text PCA Projection (all samples)")
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(6,5))
+for i in range(4):
+    xs = [vis_proj[n][i,0] for n in range(len(vis_proj))]
+    ys = [vis_proj[n][i,1] for n in range(len(vis_proj))]
+    plt.scatter(xs, ys, color=colors[i], alpha=0.6, label=f"vis{i+1}")
+plt.title("Vision PCA Projection (all samples)")
+plt.legend()
+plt.show()
+
+plt.figure(figsize=(6,5))
+im = plt.imshow(mean_sim, cmap="coolwarm", vmin=mean_sim.min(), vmax=mean_sim.max())
+plt.colorbar(im)
+for i in range(4):
+    for j in range(4):
+        plt.text(j, i, f"{mean_sim[i, j]:.2f}", ha="center", va="center", color="black")
+plt.xticks(range(4), [f"vis{j+1}" for j in range(4)])
+plt.yticks(range(4), [f"txt{i+1}" for i in range(4)])
+plt.title(f"Average Cosine Similarity (PCA dim={pca_dim})" + ("\nBaseline Subtracted" if use_baseline else ""))
+plt.show()
