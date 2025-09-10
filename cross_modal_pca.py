@@ -26,10 +26,21 @@ def clean_array(x):
         x2[:, d] = col
     return x2
 
+# clean and reshape
 txt_clean = []
+vis_clean = []
 for n in range(txt.shape[0]):
     txt_clean.append(clean_array(txt[n].T))
-txt_clean = np.vstack(txt_clean)  # (100*4, 3584)
+    vis_clean.append(clean_array(vis[n].T))
+txt_clean = np.vstack(txt_clean) 
+vis_clean = np.vstack(vis_clean) 
+
+
+txt_mean, txt_std = txt_clean.mean(axis=0), txt_clean.std(axis=0)
+vis_mean, vis_std = vis_clean.mean(axis=0), vis_clean.std(axis=0)
+txt_clean = (txt_clean - txt_mean) #/ (txt_std + 1e-8)
+vis_clean = (vis_clean - vis_mean) #/ (vis_std + 1e-8)
+
 
 pca = PCA(n_components=pca_dim)
 pca.fit(txt_clean)
@@ -41,8 +52,8 @@ vis_proj = []
 all_sims = []
 
 for n in range(vis.shape[0]):
-    txt_emb = clean_array(txt[n].T)
-    vis_emb = clean_array(vis[n].T)
+    txt_emb = (clean_array(txt[n].T) - txt_mean) / (txt_std + 1e-8)
+    vis_emb = (clean_array(vis[n].T) - vis_mean) / (vis_std + 1e-8)
 
     txt_emb_pca = pca.transform(txt_emb)
     vis_emb_pca = pca.transform(vis_emb)
@@ -64,6 +75,7 @@ for i in range(4):
     xs = [txt_proj[n][i,0] for n in range(len(txt_proj))]
     ys = [txt_proj[n][i,1] for n in range(len(txt_proj))]
     plt.scatter(xs, ys, color=colors[i], alpha=0.6, label=f"txt{i+1}")
+
 plt.title("Text PCA Projection (all samples)")
 plt.legend()
 plt.show()
@@ -73,6 +85,7 @@ for i in range(4):
     xs = [vis_proj[n][i,0] for n in range(len(vis_proj))]
     ys = [vis_proj[n][i,1] for n in range(len(vis_proj))]
     plt.scatter(xs, ys, color=colors[i], alpha=0.6, label=f"vis{i+1}")
+
 plt.title("Vision PCA Projection (all samples)")
 plt.legend()
 plt.show()
@@ -83,7 +96,8 @@ plt.colorbar(im)
 for i in range(4):
     for j in range(4):
         plt.text(j, i, f"{mean_sim[i, j]:.2f}", ha="center", va="center", color="black")
+
 plt.xticks(range(4), [f"vis{j+1}" for j in range(4)])
 plt.yticks(range(4), [f"txt{i+1}" for i in range(4)])
-plt.title(f"Average Cosine Similarity (PCA dim={pca_dim})" + ("\nBaseline Subtracted" if use_baseline else ""))
+plt.title(f"Average Cosine Similarity (PCA dim={pca_dim}, Z-score norm)" + ("\nBaseline Subtracted" if use_baseline else ""))
 plt.show()
