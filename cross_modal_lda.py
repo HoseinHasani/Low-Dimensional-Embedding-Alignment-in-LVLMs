@@ -3,7 +3,8 @@ import matplotlib.pyplot as plt
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis as LDA
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix
+import seaborn as sns
 
 use_baseline = False
 pca_dim = 10
@@ -44,9 +45,19 @@ txt_clean = np.vstack(txt_clean)
 vis_clean = np.vstack(vis_clean)
 labels = np.array(labels)
 
-scaler = StandardScaler()
-txt_z = scaler.fit_transform(txt_clean)
-vis_z = scaler.fit_transform(vis_clean)
+# scaler = StandardScaler()
+# scaler.fit(np.vstack([txt_clean, vis_clean]))
+# txt_z = scaler.transform(txt_clean)
+# vis_z = scaler.transform(vis_clean)
+
+# scaler = StandardScaler()
+# txt_z = scaler.fit_transform(txt_clean)
+# vis_z = scaler.fit_transform(vis_clean)
+
+txt_mean, txt_std = txt_clean.mean(axis=0), txt_clean.std(axis=0)
+vis_mean, vis_std = vis_clean.mean(axis=0), vis_clean.std(axis=0)
+txt_z = (txt_clean - txt_mean) #/ (txt_std + 1e-8)
+vis_z = (vis_clean - vis_mean) #/ (vis_std + 1e-8)
 
 max_dim = min(txt_z.shape[0], txt_z.shape[1])
 pca = PCA(n_components=min(pca_dim, max_dim))
@@ -72,11 +83,10 @@ acc = accuracy_score(y_test, y_pred)
 print(f"Source: {source_modality} → Target: {target_modality}")
 print(f"Cross-modal LDA classification accuracy: {acc:.4f}")
 
-proj = clf.transform(X_test)
+cm = confusion_matrix(y_test, y_pred)
 plt.figure(figsize=(6,5))
-for cls in np.unique(y_test):
-    idx = (y_test == cls)
-    plt.scatter(proj[idx, 0], proj[idx, 0]*0, label=f"class {cls}", alpha=0.6)
-plt.title(f"LDA projection of {target_modality} (tested)")
-plt.legend()
+sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=np.unique(labels), yticklabels=np.unique(labels))
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.title("Cross-modal Confusion Matrix")
 plt.show()
