@@ -2,15 +2,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import normalize
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.metrics import accuracy_score
+from sklearn.metrics import accuracy_score, confusion_matrix
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 
 use_baseline = True  
-baseline_mode = "post"
+baseline_mode = "pre" # post or pre
 normalize_std = False
-pca_dim = 3
-clf_source = "txt"  
+pca_dim = 5
+clf_source = "vis"  
 
 vis = np.load("data/just_number_L25/visual_row_means_L25.npy")
 txt = np.load("data/just_number_L25/text_fullline_rows_L25.npy")
@@ -35,14 +35,23 @@ def clean_array(x):
 
 txt_clean = []
 vis_clean = []
+vis_clean_base = []
+
 for n in range(txt.shape[0]):
     txt_clean.append(clean_array(txt[n].T))
     vis_clean.append(clean_array(vis[n].T))
+    if use_baseline:
+        vis_clean_base.append(clean_array(vis_baseline[n].T))
+    
 txt_clean = np.vstack(txt_clean) 
 vis_clean = np.vstack(vis_clean) 
 
 txt_mean, txt_std = txt_clean.mean(axis=0), txt_clean.std(axis=0)
 vis_mean, vis_std = vis_clean.mean(axis=0), vis_clean.std(axis=0)
+
+if use_baseline:
+    vis_clean_base = np.vstack(vis_clean_base) 
+    vis_mean_base, vis_std_base = vis_clean_base.mean(axis=0), vis_clean.std(axis=0)
 
 
 txt_clean = (txt_clean - txt_mean)
@@ -76,9 +85,9 @@ for n in range(vis.shape[0]):
     vis_proj.append(vis_emb_pca)
 
     if vis_baseline_proj is not None:
-        vis_base_emb = (clean_array(vis_baseline[n].T) - vis_mean)
+        vis_base_emb = (clean_array(vis_baseline[n].T) - vis_mean_base)
         if normalize_std:
-            vis_base_emb = vis_base_emb / (vis_std + 1e-8)
+            vis_base_emb = vis_base_emb / (vis_std_base + 1e-8)
         vis_baseline_proj.append(pca.transform(vis_base_emb))
 
 txt_proj = np.array(txt_proj)
@@ -103,26 +112,46 @@ for n in range(vis.shape[0]):
 mean_sim = np.mean(all_sims, axis=0)
 
 
-txt_features = np.mean(txt_proj, axis=1)
-vis_features = np.mean(vis_proj, axis=1)
-
-
 num_samples = txt_proj.shape[0]
-labels = np.tile(np.arange(4), num_samples // 4)
+seq_len = txt_proj.shape[1]
+feat_dim = txt_proj.shape[2]
+
+txt_flat = txt_proj.reshape(num_samples * seq_len, feat_dim)
+vis_flat = vis_proj.reshape(num_samples * seq_len, feat_dim)
+
+txt_flat = normalize(txt_flat, norm="l2")
+vis_flat = normalize(vis_flat, norm="l2")
+
+labels = np.tile(np.arange(seq_len), num_samples)
 
 if clf_source == "txt":
     clf = LogisticRegression(max_iter=1000)
-    clf.fit(txt_features, labels)
-    preds = clf.predict(vis_features)
+    clf.fit(txt_flat, labels)
+    preds = clf.predict(vis_flat)
     acc = accuracy_score(labels, preds)
-    print(f"Train on TEXT, test on VISION → Accuracy: {acc:.3f}")
-
+    clf_src_trg = "train on text, test on vision"
+    print(f"{clf_src_trg} → Accuracy: {acc:.3f}")
 elif clf_source == "vis":
     clf = LogisticRegression(max_iter=1000)
-    clf.fit(vis_features, labels)
-    preds = clf.predict(txt_features)
+    clf.fit(vis_flat, labels)
+    preds = clf.predict(txt_flat)
     acc = accuracy_score(labels, preds)
-    print(f"Train on VISION, test on TEXT → Accuracy: {acc:.3f}")
+    clf_src_trg = "train on vision, test on text"
+    print(f"{clf_src_trg} → Accuracy: {acc:.3f}")
+
+cm = confusion_matrix(labels, preds)
+plt.figure(figsize=(8, 7))
+im = plt.imshow(cm, cmap="Blues")
+plt.colorbar(im)
+for i in range(cm.shape[0]):
+    for j in range(cm.shape[1]):
+        plt.text(j, i, str(cm[i, j]), ha="center", va="center", color="black")
+plt.xticks(range(seq_len), [f"cls{j}" for j in range(seq_len)])
+plt.yticks(range(seq_len), [f"cls{i}" for i in range(seq_len)])
+plt.xlabel("Predicted")
+plt.ylabel("True")
+plt.title(f"Confusion Matrix ({clf_src_trg})")
+plt.show()
 
 
 plt.figure(figsize=(8,7))
