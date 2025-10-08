@@ -10,7 +10,7 @@ from tqdm import tqdm
 data_dir = "data/attentions_temp1"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
 
-n_files = 4000
+n_files = 8000
 avg_win_size = 3
 stride_size = 1
 eps = 1e-8
@@ -126,6 +126,30 @@ def plot_ratio(results, avg_win_size, stride_size, eps=1e-8):
     plt.savefig("attention_ratio_tp_fp.png", dpi=140)
     plt.show()
 
+
+def plot_position_histograms(results, bins=50):
+    tp_positions = [p for p, _ in results["tp"]["image"]]
+    fp_positions = [p for p, _ in results["fp"]["image"]]
+    if not tp_positions or not fp_positions:
+        print("Warning: missing TP or FP positions for histogram.")
+        return
+
+    plt.figure(figsize=(8, 5))
+    plt.hist(tp_positions, bins=bins, density=True, alpha=0.66, color="tab:blue", label="TP")
+    plt.hist(fp_positions, bins=bins, density=True, alpha=0.55, color="tab:red", label="FP")
+    plt.xlabel("Token Position in Generated Text", fontsize=14)
+    plt.xlim(-1, 202)
+    plt.ylabel("Normalized Frequency", fontsize=14)
+    plt.title("Distribution of Object Token Positions (TP vs FP)", fontsize=15)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.savefig("hist_tp_fp_positions.png", dpi=140)
+    plt.show()
+    
+    
+    
 plot_modality("image", results, avg_win_size, stride_size)
 plot_modality("text", results, avg_win_size, stride_size)
 plot_ratio(results, avg_win_size, stride_size, eps)
+plot_position_histograms(results, bins=50)
+
