@@ -6,11 +6,12 @@ import seaborn as sns
 from glob import glob
 from scipy.stats import sem
 from tqdm import tqdm
+import json
 
 data_dir = "data/attentions_temp1"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
 
-n_files = 8000
+n_files = 4000
 avg_win_size = 3
 stride_size = 1
 eps = 1e-8
@@ -147,9 +148,46 @@ def plot_position_histograms(results, bins=50):
     plt.show()
     
     
+
+def compute_optimal_thresholds_image(results):
+    def smooth(values):
+        smoothed = np.copy(values)
+        for i in range(1, len(values) - 1):
+            smoothed[i] = 0.2 * values[i - 1] + 0.6 * values[i] + 0.2 * values[i + 1]
+        if len(values) > 1:
+            smoothed[0] = 0.8 * values[0] + 0.2 * values[1]
+            smoothed[-1] = 0.8 * values[-1] + 0.2 * values[-2]
+        return smoothed
+
+    thresholds = {}
+    all_positions = sorted(set(p for cls_ in ["tp", "fp"]
+                               for p, _ in results[cls_]["image"]))
+
+    for pos in all_positions:
+        tp_vals = [v for p, v in results["tp"]["image"] if int(p) == pos]
+        fp_vals = [v for p, v in results["fp"]["image"] if int(p) == pos]
+        if len(tp_vals) < 2 or len(fp_vals) < 2:
+            continue
+
+        tp_vals = smooth(np.array(tp_vals))
+        fp_vals = smooth(np.array(fp_vals))
+
+        m1, s1 = np.mean(tp_vals), np.std(tp_vals)
+        m2, s2 = np.mean(fp_vals), np.std(fp_vals)
+        th = (m1 * s2 + m2 * s1) / (s1 + s2 + 1e-8)
+        thresholds[pos] = float(th)
+
+    return thresholds
+
+
     
 plot_modality("image", results, avg_win_size, stride_size)
 plot_modality("text", results, avg_win_size, stride_size)
 plot_ratio(results, avg_win_size, stride_size, eps)
 plot_position_histograms(results, bins=50)
+
+thresholds = compute_optimal_thresholds_image(results)
+
+with open("optimal_thresholds.json", 'w') as json_file:
+    json.dump(thresholds, json_file, indent=4)
 
