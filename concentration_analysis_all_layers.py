@@ -13,40 +13,55 @@ n_files = 3900
 n_layers, n_heads = 15, 32
 avg_win_size = 2
 stride_size = 1
-n_top_k = 20
+n_top_k = 5
 n_subtokens = 1
 offset_layer = 14
 eps = 1e-8
+grid_size = 24
+metric_type = "variance"  # choose from ["entropy", "inverse_simpson", "gini", "mass_ratio", "spread", "variance"]
 sns.set(style="darkgrid")
 
-concentration_metric = "std_spatial"  # options: 'entropy', 'inverse_simpson', 'gini', 'mass_ratio', 'std_spatial'
-grid_size = 24
+def compute_concentration_metric(values, indices, metric):
+    w = np.array(values, dtype=float)
+    if w.ndim != 3:
+        return None
+    idxs = np.array(indices, dtype=int)
+    if idxs.ndim != 3:
+        return None
+    n_layers, n_heads, n_top = w.shape
+    x = (idxs % grid_size + 0.5) / grid_size
+    y = (idxs // grid_size + 0.5) / grid_size
+    out = np.zeros((n_layers, n_heads))
+    for l in range(n_layers):
+        for h in range(n_heads):
+            vals = w[l, h]
+            probs = vals / (np.sum(vals) + eps)
+            if metric == "entropy":
+                out[l, h] = -np.sum(probs * np.log(probs + eps))
+            elif metric == "inverse_simpson":
+                out[l, h] = 1.0 / (np.sum(probs ** 2) + eps)
+            elif metric == "gini":
+                sorted_p = np.sort(probs)
+                n = len(sorted_p)
+                coef = 2 * np.arange(1, n + 1) - n - 1
+                out[l, h] = np.sum(coef * sorted_p) / (n * np.sum(sorted_p) + eps)
+            elif metric == "mass_ratio":
+                k = min(3, len(probs))
+                sorted_p = np.sort(probs)[::-1]
+                out[l, h] = np.sum(sorted_p[:k])
+            elif metric == "spread":
+                px, py = np.sum(probs * x[l, h]), np.sum(probs * y[l, h])
+                sx = np.sum(probs * (x[l, h] - px) ** 2)
+                sy = np.sum(probs * (y[l, h] - py) ** 2)
+                out[l, h] = np.sqrt(sx + sy)
+            elif metric == "variance":
+                px, py = np.sum(probs * x[l, h]), np.sum(probs * y[l, h])
+                d = np.sqrt((x[l, h] - px) ** 2 + (y[l, h] - py) ** 2)
+                mean_d = np.sum(probs * d)
+                out[l, h] = np.sum(probs * (d - mean_d) ** 2)
+    return out
 
-def compute_concentration(topk_indices, topk_values, metric):
-    vals = np.maximum(topk_values, 0)
-    if vals.sum() == 0:
-        return np.nan
-    p = vals / (vals.sum() + eps)
-    if metric == "entropy":
-        return -np.sum(p * np.log(p + eps))
-    elif metric == "inverse_simpson":
-        return 1.0 / np.sum(p ** 2)
-    elif metric == "gini":
-        sorted_p = np.sort(p)
-        n = len(p)
-        return 1 - 2 * np.sum((n - np.arange(1, n + 1) + 0.5) * sorted_p) / n
-    elif metric == "mass_ratio":
-        return np.sum(np.sort(p)[-5:])
-    elif metric == "std_spatial":
-        coords = np.array([[idx % grid_size, idx // grid_size] for idx in topk_indices])
-        cx, cy = np.sum(p * coords[:, 0]), np.sum(p * coords[:, 1])
-        dx = np.sqrt(np.sum(p * (coords[:, 0] - cx) ** 2))
-        dy = np.sqrt(np.sum(p * (coords[:, 1] - cy) ** 2))
-        return np.sqrt(dx ** 2 + dy ** 2)
-    else:
-        return np.nan
-
-def extract_concentration_values(data_dict, cls_):
+def extract_concentration_values(data_dict, cls_, metric):
     results = []
     entries = data_dict.get(cls_, {}).get("image", [])
     for e in entries:
@@ -55,19 +70,14 @@ def extract_concentration_values(data_dict, cls_):
         for sub in e["subtoken_results"][:n_subtokens]:
             topk_vals = np.array(sub["topk_values"], dtype=float)
             topk_inds = np.array(sub["topk_indices"], dtype=int)
-            if topk_vals.ndim != 3:
+            if topk_vals.ndim != 3 or topk_inds.ndim != 3:
                 continue
             idx = int(sub["idx"])
-            metric_vals = np.zeros((n_layers, n_heads))
-            for l in range(n_layers):
-                for h in range(n_heads):
-                    metric_vals[l, h] = compute_concentration(topk_inds[l, h, :n_top_k],
-                                                              topk_vals[l, h, :n_top_k],
-                                                              concentration_metric)
-            results.append((idx, metric_vals))
+            conc = compute_concentration_metric(topk_vals[..., :n_top_k], topk_inds[..., :n_top_k], metric)
+            results.append((idx, conc))
     return results
 
-def aggregate_across_images(files, n_files):
+def aggregate_across_images(files, n_files, metric):
     tp_collect = []
     fp_collect = []
     for f in tqdm(files[:n_files]):
@@ -76,16 +86,16 @@ def aggregate_across_images(files, n_files):
                 data_dict = pickle.load(handle)
         except Exception:
             continue
-        tp_collect.extend(extract_concentration_values(data_dict, "tp"))
-        fp_collect.extend(extract_concentration_values(data_dict, "fp"))
+        tp_collect.extend(extract_concentration_values(data_dict, "tp", metric))
+        fp_collect.extend(extract_concentration_values(data_dict, "fp", metric))
     return tp_collect, fp_collect
 
-def aggregate_by_position(data, n_layers, n_heads):
+def aggregate_by_position(conc_data, n_layers, n_heads):
     layer_head_data = {l: {h: {} for h in range(n_heads)} for l in range(n_layers)}
-    for idx, vals in data:
+    for idx, conc_vals in conc_data:
         for l in range(n_layers):
             for h in range(n_heads):
-                layer_head_data[l][h].setdefault(int(idx), []).append(float(vals[l, h]))
+                layer_head_data[l][h].setdefault(int(idx), []).append(float(conc_vals[l, h]))
     return layer_head_data
 
 def smooth_with_ci_from_posmap(pos_map, win=3, stride=1):
@@ -109,12 +119,11 @@ def smooth_with_ci_from_posmap(pos_map, win=3, stride=1):
     return np.array(xs), np.array(ys), np.array(cis)
 
 def plot_concentration_grid(tp_posmap, fp_posmap, n_layers, n_heads,
-                            savepath, x_min=9, x_max=141):
-    fig_w = n_heads * 1.0
-    fig_h = n_layers * 0.8
-    fig, axes = plt.subplots(n_layers, n_heads, figsize=(fig_w, fig_h),
-                             sharex=False, sharey=False)
-    fig.suptitle(f"Concentration Metric: {concentration_metric} (TP: blue, FP: red)", fontsize=40)
+                            savepath="concentration_grid.pdf", metric_name="", x_min=9, x_max=141):
+    fig_w = n_heads * 4
+    fig_h = n_layers * 3
+    fig, axes = plt.subplots(n_layers, n_heads, figsize=(fig_w, fig_h), sharex=False, sharey=False)
+    fig.suptitle(f"{metric_name.capitalize()} Concentration (TP: blue, FP: red)", fontsize=60)
     for l in range(n_layers):
         for h in range(n_heads):
             ax = axes[l, h]
@@ -131,11 +140,11 @@ def plot_concentration_grid(tp_posmap, fp_posmap, n_layers, n_heads,
             ax.set_xlim(x_min, x_max)
             ys_for_limits = []
             if tp_y.size > 0:
-                ys_for_limits.extend((tp_y - tp_ci).tolist())
-                ys_for_limits.extend((tp_y + tp_ci).tolist())
+                ys_for_limits.extend((tp_y - 0.1*tp_ci)[6: -30].tolist())
+                ys_for_limits.extend((tp_y + 0.1*tp_ci)[6: -30].tolist())
             if fp_y.size > 0:
-                ys_for_limits.extend((fp_y - fp_ci).tolist())
-                ys_for_limits.extend((fp_y + fp_ci).tolist())
+                ys_for_limits.extend((fp_y - 0.1*fp_ci)[4: -30].tolist())
+                ys_for_limits.extend((fp_y + 0.1*fp_ci)[4: -30].tolist())
             if ys_for_limits:
                 y_min = min(ys_for_limits)
                 y_max = max(ys_for_limits)
@@ -149,16 +158,14 @@ def plot_concentration_grid(tp_posmap, fp_posmap, n_layers, n_heads,
             ax.set_xticks([])
             ax.set_yticks([])
             if l == n_layers - 1:
-                ax.set_xlabel(f"H{h}", fontsize=10)
+                ax.set_xlabel(f"H{h}", fontsize=30)
             if h == 0:
-                ax.set_ylabel(f"L{l+offset_layer}", fontsize=10)
-    plt.tight_layout(rect=[0, 0, 1, 0.95])
-    plt.savefig(savepath, dpi=300)
+                ax.set_ylabel(f"L{l+offset_layer}", fontsize=30)
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(f"concentration_grid_{metric_name}.pdf")
     plt.show()
 
-tp_data, fp_data = aggregate_across_images(files, n_files)
+tp_data, fp_data = aggregate_across_images(files, n_files, metric_type)
 tp_posmap = aggregate_by_position(tp_data, n_layers, n_heads)
 fp_posmap = aggregate_by_position(fp_data, n_layers, n_heads)
-
-save_name = f"concentration_grid_{concentration_metric}.pdf"
-plot_concentration_grid(tp_posmap, fp_posmap, n_layers, n_heads, savepath=save_name)
+plot_concentration_grid(tp_posmap, fp_posmap, n_layers, n_heads, metric_name=metric_type)
