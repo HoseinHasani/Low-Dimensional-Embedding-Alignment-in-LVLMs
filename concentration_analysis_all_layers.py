@@ -6,20 +6,22 @@ from glob import glob
 from tqdm import tqdm
 import seaborn as sns
 from scipy.stats import sem
+from scipy.spatial import ConvexHull
 
 data_dir = "data/all layers attention tp fp"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
-n_files = 3900
+n_files = 1900
 n_layers, n_heads = 15, 32
 avg_win_size = 2
 stride_size = 1
-n_top_k = 5
+n_top_k = 20
 n_subtokens = 1
 offset_layer = 14
 eps = 1e-8
 grid_size = 24
-metric_type = "variance"  # choose from ["entropy", "inverse_simpson", "gini", "mass_ratio", "spread", "variance"]
+metric_type = "gini"  # choose from ["entropy", "inverse_simpson", "gini", "mass_ratio", "spread", "variance", "convex_hull"]
 sns.set(style="darkgrid")
+
 
 def compute_concentration_metric(values, indices, metric):
     w = np.array(values, dtype=float)
@@ -59,7 +61,21 @@ def compute_concentration_metric(values, indices, metric):
                 d = np.sqrt((x[l, h] - px) ** 2 + (y[l, h] - py) ** 2)
                 mean_d = np.sum(probs * d)
                 out[l, h] = np.sum(probs * (d - mean_d) ** 2)
+            elif metric == "convex_hull":
+                coords = np.stack([x[l, h], y[l, h]], axis=1)
+                k = min(10, len(probs))
+                top_idx = np.argsort(probs)[::-1][:k]
+                pts = coords[top_idx]
+                if len(pts) >= 3:
+                    try:
+                        hull = ConvexHull(pts)
+                        out[l, h] = hull.area  
+                    except Exception:
+                        out[l, h] = 0.0
+                else:
+                    out[l, h] = 0.0
     return out
+
 
 def extract_concentration_values(data_dict, cls_, metric):
     results = []
