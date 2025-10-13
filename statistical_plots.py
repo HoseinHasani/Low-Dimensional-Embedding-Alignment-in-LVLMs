@@ -9,20 +9,28 @@ from scipy.stats import sem, ttest_ind
 
 data_dir = "data/all layers attention tp fp"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
-save_dir = "selected_plots"
-os.makedirs(save_dir, exist_ok=True)
+
 
 n_files = 3900
 n_layers, n_heads = 15, 32
-avg_win_size = 7
+avg_win_size = 3
 stride_size = 1
 n_top_k = 20
 n_subtokens = 1
 offset_layer = 14
-eps = 1e-8
+eps = 1e-60
 grid_size = 24
 selected_positions = [30, 60, 80, 100, 130]
-n_select = 30
+
+position_margin = 2
+n_select = 20
+p_combine_mode = "min"  # or "max"
+
+
+save_dir = f"selected_plots__n{n_files}__{p_combine_mode}_pval"
+
+os.makedirs(save_dir, exist_ok=True)
+
 sns.set(style="darkgrid")
 
 def compute_entropy(values):
@@ -126,11 +134,11 @@ def plot_selected(tp_posmap, fp_posmap, metric_name, selected, save_dir, x_min=9
             plt.ylim(y_min - y_pad, y_max + y_pad)
         else:
             plt.ylim(0.0, 1.0)
-        plt.title(f"{metric_name} L{l+offset_layer}H{h} log(p)={pval_log:.2f}", fontsize=12)
+        plt.title(f"{metric_name} L{l+offset_layer}H{h} log(p-value)={pval_log:.1f}", fontsize=12)
         plt.xticks([])
         plt.yticks([])
         plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, f"{metric_name}_L{l}_H{h}_logp{pval_log:.2f}.png"), dpi=130)
+        plt.savefig(os.path.join(save_dir, f"{metric_name}_L{l}_H{h}_logp{pval_log:.1f}.png"), dpi=130)
         plt.close()
 
 tp_data, fp_data = aggregate_across_images(files, n_files)
@@ -138,19 +146,33 @@ tp_maps = [aggregate_by_position(tp_data, i) for i in range(3)]
 fp_maps = [aggregate_by_position(fp_data, i) for i in range(3)]
 metric_names = ["attention", "entropy", "gini"]
 
+all_log_pvals = [] 
+
 for midx, metric in enumerate(metric_names):
-    pvals = []
     for l in range(n_layers):
         for h in range(n_heads):
             tp_map = tp_maps[midx][l][h]
             fp_map = fp_maps[midx][l][h]
-            tp_vals, fp_vals = [], []
+            pos_pvals = []
             for pos in selected_positions:
-                tp_vals.extend(tp_map.get(pos, []))
-                fp_vals.extend(fp_map.get(pos, []))
-            if len(tp_vals) > 1 and len(fp_vals) > 1:
-                _, p = ttest_ind(tp_vals, fp_vals, equal_var=False)
-                pvals.append((l, h, p))
-    pvals = sorted(pvals, key=lambda x: x[2])[:n_select]
-    selected = [(l, h, -np.log10(p+eps)) for l, h, p in pvals]
-    plot_selected(tp_maps[midx], fp_maps[midx], metric, selected, save_dir)
+                tp_vals, fp_vals = [], []
+                for p in range(pos - position_margin, pos + position_margin + 1):
+                    tp_vals.extend(tp_map.get(p, []))
+                    fp_vals.extend(fp_map.get(p, []))
+                if len(tp_vals) > 1 and len(fp_vals) > 1:
+                    _, p_val = ttest_ind(tp_vals, fp_vals, equal_var=False)
+                    pos_pvals.append(p_val)
+            if not pos_pvals:
+                continue
+            log_pos_pvals = [np.log10(p + eps) for p in pos_pvals]
+            if p_combine_mode == "min":
+                combined_log_p = np.min(log_pos_pvals)
+            else:
+                combined_log_p = np.max(log_pos_pvals)
+            all_log_pvals.append((midx, l, h, combined_log_p))
+
+selected_global = sorted(all_log_pvals, key=lambda x: x[3])[:n_select]
+
+for midx, l, h, logp in selected_global:
+    metric = metric_names[midx]
+    plot_selected(tp_maps[midx], fp_maps[midx], metric, [(l, h, logp)], save_dir)
