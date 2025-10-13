@@ -1,3 +1,5 @@
 data/
 attention heatmaps/
 *.pdf
+*.png
+*.json
