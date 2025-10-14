@@ -6,71 +6,104 @@ from glob import glob
 from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+from scipy.stats import entropy
 
-data_dir = "data/attentions_greedy"
-save_dir = "results_position_sweep"
+data_dir = "data/all layers attention tp fp"
+save_dir = "results_layerwise_headwise"
 os.makedirs(save_dir, exist_ok=True)
 
+n_files = 3900
+n_layers, n_heads = 15, 32
 min_position = 5
 max_position = 150
 position_margin = 2
-min_class_samples = 5
-n_files = 3800
+n_top_k = 5
+n_subtokens = 1
+offset_layer = 14
+eps = 1e-8
 
-files = sorted(glob(os.path.join(data_dir, "attentions_*.pkl")))
-train_files = files[: n_files // 2]
-test_files = files[n_files // 2 : n_files]
+def extract_attention_values(data_dict, cls_):
+    results = []
+    entries = data_dict.get(cls_, {}).get("image", [])
+    for e in entries:
+        if not e.get("subtoken_results"):
+            continue
+        for sub in e["subtoken_results"][:n_subtokens]:
+            topk_vals = np.array(sub["topk_values"], dtype=float)
+            if topk_vals.ndim != 3:
+                continue
+            idx = int(sub["idx"])
+            mean_vals = np.mean(topk_vals[..., :n_top_k], axis=-1)
+            results.append((idx, mean_vals))
+    return results
+
+def aggregate_across_images(files, n_files):
+    tp_collect = []
+    fp_collect = []
+    for f in tqdm(files[:n_files]):
+        try:
+            with open(f, "rb") as handle:
+                data_dict = pickle.load(handle)
+        except Exception:
+            continue
+        tp_collect.extend(extract_attention_values(data_dict, "tp"))
+        fp_collect.extend(extract_attention_values(data_dict, "fp"))
+    return tp_collect, fp_collect
+
+def aggregate_by_position(attention_data, n_layers, n_heads):
+    layer_head_data = {l: {h: {} for h in range(n_heads)} for l in range(n_layers)}
+    for idx, mean_vals in attention_data:
+        for l in range(n_layers):
+            for h in range(n_heads):
+                layer_head_data[l][h].setdefault(int(idx), []).append(float(mean_vals[l, h]))
+    return layer_head_data
 
 def compute_entropy(values):
-    vals = np.array(values, dtype=float)
-    if vals.ndim != 3: return None
-    probs = vals / (np.sum(vals, axis=-1, keepdims=True) + 1e-8)
-    ent = -np.sum(probs * np.log(probs + 1e-8), axis=-1)
-    return ent
+    if len(values) == 0:
+        return 0
+    prob = np.array(values) / np.sum(values, axis=-1, keepdims=True)
+    return -np.sum(prob * np.log(prob + eps), axis=-1)
 
 def compute_gini(values):
-    vals = np.array(values, dtype=float)
-    if vals.ndim != 3: return None
-    probs = vals / (np.sum(vals, axis=-1, keepdims=True) + 1e-8)
-    sorted_p = np.sort(probs, axis=-1)
+    if len(values) == 0:
+        return 0
+    prob = np.array(values) / np.sum(values, axis=-1, keepdims=True)
+    sorted_p = np.sort(prob, axis=-1)
     n = sorted_p.shape[-1]
     coef = 2 * np.arange(1, n + 1) - n - 1
-    gini = np.sum(coef * sorted_p, axis=-1) / (n * np.sum(sorted_p, axis=-1) + 1e-8)
+    gini = np.sum(coef * sorted_p, axis=-1) / (n * np.sum(sorted_p, axis=-1) + eps)
     return np.abs(gini)
 
-def extract_all_features(files, max_position, position_margin):
+def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_position, position_margin):
     X, y, pos_list = [], [], []
-    for f in tqdm(files):
-        with open(f, "rb") as handle:
-            data_dict = pickle.load(handle)
+    for f in tqdm(files[:n_files]):
+        try:
+            with open(f, "rb") as handle:
+                data_dict = pickle.load(handle)
+        except Exception:
+            continue
         for cls_, label in [("tp", 1), ("fp", 0)]:
-            for modality in ["image"]:
-                entries = data_dict.get(cls_, {}).get(modality, [])
-                for e in entries:
-                    token_indices = e.get("token_indices", [])
-                    subs = e.get("subtoken_results", [])
-                    if len(token_indices) == 0 or len(subs) == 0:
-                        continue
-                    token_pos = int(token_indices[0])
-                    if token_pos < min_position or token_pos > max_position:
-                        continue
-                    features = []
-                    for sub in subs[:1]:  
-                        topk = sub.get("topk_values", [])
-                        if topk and isinstance(topk, (list, np.ndarray)):
-                            mean_attention = np.mean(topk, axis=-1)
-                            entropy = compute_entropy(topk)
-                            gini = compute_gini(topk)
-                            if mean_attention is not None and entropy is not None and gini is not None:
-                                features.extend(mean_attention.flatten())
-                                features.extend(entropy.flatten())
-                                features.extend(gini.flatten())
-                    if features:
-                        pos_norm = token_pos / max_position
-                        features = np.append(features, pos_norm)
-                        X.append(features)
-                        y.append(label)
-                        pos_list.append(token_pos)
+            attention_data = extract_attention_values(data_dict, cls_)
+            layer_head_data = aggregate_by_position(attention_data, n_layers, n_heads)
+            for idx, mean_vals in attention_data:
+                token_pos = int(idx)
+                if token_pos < min_position or token_pos > max_position:
+                    continue
+                features = []
+                for l in range(n_layers):
+                    for h in range(n_heads):
+                        attention_values = layer_head_data[l][h].get(token_pos, [])
+                        if attention_values:
+                            mean_attention = np.mean(attention_values)
+                            entropy_vals = compute_entropy(attention_values)
+                            gini_vals = compute_gini(attention_values)
+                            features.extend([mean_attention, entropy_vals, gini_vals])
+                if features:
+                    pos_norm = token_pos / max_position
+                    features.append(pos_norm)
+                    X.append(features)
+                    y.append(label)
+                    pos_list.append(token_pos)
     if len(X) == 0:
         return None, None, None
     max_len = max(len(x) for x in X)
@@ -79,8 +112,9 @@ def extract_all_features(files, max_position, position_margin):
     pos_list = np.array(pos_list)
     return X_padded, y, pos_list
 
-X_train, y_train, pos_train = extract_all_features(train_files, max_position, position_margin)
-X_test, y_test, pos_test = extract_all_features(test_files, max_position, position_margin)
+files = sorted(glob(os.path.join(data_dir, "attentions_*.pkl")))
+X_train, y_train, pos_train = extract_all_features(files, n_files, n_layers, n_heads, min_position, max_position, position_margin)
+X_test, y_test, pos_test = extract_all_features(files, n_files // 2, n_layers, n_heads, min_position, max_position, position_margin)
 
 clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")
 clf.fit(X_train, y_train)
@@ -89,13 +123,12 @@ y_pred = clf.predict(X_test)
 precision_global, recall_global, f1_global, _ = precision_recall_fscore_support(y_test, y_pred, average='binary')
 acc_global = accuracy_score(y_test, y_pred)
 
-print(f"Global Metrics:")
+print("Global Metrics:")
 print(f"Precision: {precision_global:.3f}")
 print(f"Recall:    {recall_global:.3f}")
 print(f"F1-score:  {f1_global:.3f}")
 print(f"Accuracy:  {acc_global:.3f}")
 
-# Token-based metrics
 positions = np.arange(min_position, max_position + 1)
 accs, precisions, recalls, f1s = [], [], [], []
 
@@ -117,7 +150,7 @@ for pos in positions:
         continue
     n_pos_tp = np.sum(y_true_pos == 1)
     n_pos_fp = np.sum(y_true_pos == 0)
-    if min(n_pos_tp, n_pos_fp) < min_class_samples:
+    if min(n_pos_tp, n_pos_fp) < 5:
         accs.append(np.nan)
         precisions.append(np.nan)
         recalls.append(np.nan)
