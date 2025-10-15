@@ -5,23 +5,34 @@ import matplotlib.pyplot as plt
 from glob import glob
 from tqdm import tqdm
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.metrics import (
+    precision_recall_fscore_support,
+    accuracy_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+)
 from scipy.stats import entropy as scipy_entropy
+import joblib
 
 data_dir = "data/all layers all attention tp fp"
 save_dir = "results_layerwise_headwise"
 os.makedirs(save_dir, exist_ok=True)
+
+dataset_path = "cls_data"  
 
 n_files = 3900
 n_layers, n_heads = 32, 32
 min_position = 5
 max_position = 150
 position_margin = 2
-n_top_k = 5
+n_top_k = 20
 n_subtokens = 1
-offset_layer = 14
 eps = 1e-8
-fp_replication_factor = 5  
+fp_replication_factor = 10
+normalize_features = True           
+classifier_type = "mlp" # choose 'rf' or 'mlp'
 
 
 def compute_entropy(values):
@@ -43,7 +54,6 @@ def compute_gini(values):
     return np.abs(gini)
 
 def extract_attention_values(data_dict, cls_):
-    """Extract per-subtoken attention matrices."""
     results = []
     entries = data_dict.get(cls_, {}).get("image", [])
     for e in entries:
@@ -59,15 +69,12 @@ def extract_attention_values(data_dict, cls_):
     return results
 
 def aggregate_by_position(attention_data, n_layers, n_heads):
-    """Aggregate mean attentions by position for each layer and head."""
     layer_head_data = {l: {h: {} for h in range(n_heads)} for l in range(n_layers)}
     for idx, mean_vals in attention_data:
         for l in range(n_layers):
             for h in range(n_heads):
                 layer_head_data[l][h].setdefault(int(idx), []).append(float(mean_vals[l, h]))
     return layer_head_data
-
-
 
 def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_position):
     X, y, pos_list, cls_list = [], [], [], []
@@ -95,8 +102,7 @@ def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_po
                             gini_vals = compute_gini(attention_values)
                             features.extend([mean_attention, entropy_vals, gini_vals])
                 if features:
-                    pos_norm = token_pos / max_position
-                    features.append(pos_norm)
+                    features.append(token_pos / max_position)
                     X.append(features)
                     y.append(label)
                     pos_list.append(token_pos)
@@ -106,18 +112,21 @@ def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_po
 
     max_len = max(len(x) for x in X)
     X_padded = np.array([np.pad(x, (0, max_len - len(x)), constant_values=0) for x in X])
-    y = np.array(y)
-    pos_list = np.array(pos_list)
-    cls_list = np.array(cls_list)
-    return X_padded, y, pos_list, cls_list
-
+    return X_padded, np.array(y), np.array(pos_list), np.array(cls_list)
 
 
 files = sorted(glob(os.path.join(data_dir, "attentions_*.pkl")))
 
-X_all, y_all, pos_all, cls_all = extract_all_features(
-    files, n_files, n_layers, n_heads, min_position, max_position
-)
+if dataset_path and os.path.exists(f"{dataset_path}/x.npy"):
+    print("Loading saved dataset...")
+    X_all = np.load(f"{dataset_path}/x.npy")
+    y_all = np.load(f"{dataset_path}/y.npy")
+    pos_all = np.load(f"{dataset_path}/pos.npy")
+    cls_all = np.load(f"{dataset_path}/cls.npy")
+else:
+    X_all, y_all, pos_all, cls_all = extract_all_features(
+        files, n_files, n_layers, n_heads, min_position, max_position
+    )
 
 split_idx = len(X_all) // 2
 X_train, X_test = X_all[:split_idx], X_all[split_idx:]
@@ -125,24 +134,56 @@ y_train, y_test = y_all[:split_idx], y_all[split_idx:]
 pos_train, pos_test = pos_all[:split_idx], pos_all[split_idx:]
 cls_train, cls_test = cls_all[:split_idx], cls_all[split_idx:]
 
-fp_mask = (y_train == 1)
-X_fp, y_fp, pos_fp, cls_fp = X_train[fp_mask], y_train[fp_mask], pos_train[fp_mask], cls_train[fp_mask]
-X_train_bal = np.concatenate([X_train, np.repeat(X_fp, fp_replication_factor, axis=0)], axis=0)
-y_train_bal = np.concatenate([y_train, np.repeat(y_fp, fp_replication_factor, axis=0)], axis=0)
-pos_train_bal = np.concatenate([pos_train, np.repeat(pos_fp, fp_replication_factor, axis=0)], axis=0)
-cls_train_bal = np.concatenate([cls_train, np.repeat(cls_fp, fp_replication_factor, axis=0)], axis=0)
 
-print(f"Balanced training size: {len(y_train_bal)} (FP={np.sum(y_train_bal==1)}, Non-FP={np.sum(y_train_bal==0)})")
+def balance_fp_samples(X, y, pos, cls, factor=5):
+    fp_mask = (y == 1)
+    X_fp, y_fp, pos_fp, cls_fp = X[fp_mask], y[fp_mask], pos[fp_mask], cls[fp_mask]
+    X_bal = np.concatenate([X, np.repeat(X_fp, factor, axis=0)], axis=0)
+    y_bal = np.concatenate([y, np.repeat(y_fp, factor, axis=0)], axis=0)
+    pos_bal = np.concatenate([pos, np.repeat(pos_fp, factor, axis=0)], axis=0)
+    cls_bal = np.concatenate([cls, np.repeat(cls_fp, factor, axis=0)], axis=0)
+    return X_bal, y_bal, pos_bal, cls_bal
+
+X_train, y_train, pos_train, cls_train = balance_fp_samples(X_train, y_train, pos_train, cls_train, fp_replication_factor)
+X_test, y_test, pos_test, cls_test = balance_fp_samples(X_test, y_test, pos_test, cls_test, fp_replication_factor)
+
+print(f"Train size: {len(y_train)} | FP={np.sum(y_train==1)}, Non-FP={np.sum(y_train==0)}")
+print(f"Test size:  {len(y_test)} | FP={np.sum(y_test==1)}, Non-FP={np.sum(y_test==0)}")
+
+scaler = None
+if normalize_features:
+    print("\nNormalizing features...")
+    scaler = StandardScaler()
+    X_train = scaler.fit_transform(X_train)
+    X_test = scaler.transform(X_test)
+    joblib.dump(scaler, os.path.join(save_dir, "scaler.pkl"))
 
 
-clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")
-clf.fit(X_train_bal, y_train_bal)
+if classifier_type == "rf":
+    clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight="balanced")
+elif classifier_type == "mlp":
+    clf = MLPClassifier(
+        hidden_layer_sizes=(512, 64),
+        activation="relu",
+        alpha=5e-4,
+        learning_rate_init=1e-3,
+        max_iter=10,
+        early_stopping=True,
+        random_state=42,
+        verbose=True,
+    )
+else:
+    raise ValueError("Invalid classifier_type. Choose 'rf' or 'mlp'.")
+
+print(f"\nTraining {classifier_type.upper()} classifier...")
+clf.fit(X_train, y_train)
+joblib.dump(clf, os.path.join(save_dir, f"{classifier_type}_model.pkl"))
+
 y_pred = clf.predict(X_test)
 
 
-precision_global, recall_global, f1_global, _ = precision_recall_fscore_support(
-    y_test, y_pred, average='binary'
-)
+
+precision_global, recall_global, f1_global, _ = precision_recall_fscore_support(y_test, y_pred, average='binary')
 acc_global = accuracy_score(y_test, y_pred)
 
 print("\n=== Global Metrics ===")
@@ -150,6 +191,17 @@ print(f"Precision: {precision_global:.3f}")
 print(f"Recall:    {recall_global:.3f}")
 print(f"F1-score:  {f1_global:.3f}")
 print(f"Accuracy:  {acc_global:.3f}")
+
+
+
+cm = confusion_matrix(y_test, y_pred)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Non-FP", "FP"])
+plt.figure(figsize=(5, 5))
+disp.plot(cmap="Blues", values_format="d", colorbar=False)
+plt.title(f"Confusion Matrix ({classifier_type.upper()} Classifier)")
+plt.tight_layout()
+plt.savefig(os.path.join(save_dir, f"confusion_matrix_{classifier_type}.png"), dpi=130)
+plt.show()
 
 
 positions = np.arange(min_position, max_position + 1)
@@ -163,17 +215,8 @@ for pos in positions:
         recalls.append(np.nan)
         f1s.append(np.nan)
         continue
-    y_true_pos = y_test[mask]
-    y_pred_pos = y_pred[mask]
+    y_true_pos, y_pred_pos = y_test[mask], y_pred[mask]
     if len(np.unique(y_true_pos)) < 2:
-        accs.append(np.nan)
-        precisions.append(np.nan)
-        recalls.append(np.nan)
-        f1s.append(np.nan)
-        continue
-    n_pos_fp = np.sum(y_true_pos == 1)
-    n_pos_nonfp = np.sum(y_true_pos == 0)
-    if min(n_pos_fp, n_pos_nonfp) < 5:
         accs.append(np.nan)
         precisions.append(np.nan)
         recalls.append(np.nan)
@@ -186,7 +229,6 @@ for pos in positions:
     recalls.append(recall)
     f1s.append(f1)
 
-
 plt.figure(figsize=(10, 6))
 plt.plot(positions, accs, label="Accuracy", linewidth=2)
 plt.plot(positions, precisions, label="Precision", linewidth=2)
@@ -194,21 +236,9 @@ plt.plot(positions, recalls, label="Recall", linewidth=2)
 plt.plot(positions, f1s, label="F1-score", linewidth=2)
 plt.xlabel("Token Position", fontsize=14)
 plt.ylabel("Metric Value", fontsize=14)
-plt.title("Classifier Performance over Token Positions (FP vs Non-FP)", fontsize=15)
+plt.title(f"Classifier Performance over Token Positions ({classifier_type.upper()})", fontsize=15)
 plt.legend(fontsize=12)
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
-plt.savefig(os.path.join(save_dir, "position_metrics_FP_vs_nonFP.png"), dpi=130)
+plt.savefig(os.path.join(save_dir, f"position_metrics_{classifier_type}.png"), dpi=130)
 plt.show()
-
-
-if hasattr(clf, "predict_proba"):
-    probs = clf.predict_proba(X_test)[:, 1]
-    fp_probs = probs[y_test == 1]
-    tp_probs = probs[(y_test == 0) & (cls_test == "tp")]
-    oth_probs = probs[(y_test == 0) & (cls_test == "other")]
-
-    print("\n=== Mean predicted probability of FP (by class) ===")
-    print(f"  FP:     {np.mean(fp_probs):.3f}")
-    print(f"  TP:     {np.mean(tp_probs):.3f}")
-    print(f"  Other:  {np.mean(oth_probs):.3f}")
