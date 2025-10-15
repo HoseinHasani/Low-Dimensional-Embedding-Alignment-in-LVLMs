@@ -7,9 +7,9 @@ from tqdm import tqdm
 import seaborn as sns
 from scipy.stats import sem
 
-data_dir = "data/all layers attention tp fp"
+data_dir = "data/all layers all attention tp fp/a/"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
-n_files = 3900
+n_files = 3960
 n_layers, n_heads = 15, 32
 avg_win_size = 2
 stride_size = 1
@@ -37,6 +37,7 @@ def extract_attention_values(data_dict, cls_):
 def aggregate_across_images(files, n_files):
     tp_collect = []
     fp_collect = []
+    oth_collect = []
     for f in tqdm(files[:n_files]):
         try:
             with open(f, "rb") as handle:
@@ -45,7 +46,9 @@ def aggregate_across_images(files, n_files):
             continue
         tp_collect.extend(extract_attention_values(data_dict, "tp"))
         fp_collect.extend(extract_attention_values(data_dict, "fp"))
-    return tp_collect, fp_collect
+        oth_collect.extend(extract_attention_values(data_dict, "other"))
+        
+    return tp_collect, fp_collect, oth_collect
 
 def aggregate_by_position(attention_data, n_layers, n_heads):
     layer_head_data = {l: {h: {} for h in range(n_heads)} for l in range(n_layers)}
@@ -76,27 +79,33 @@ def smooth_with_ci_from_posmap(pos_map, win=3, stride=1):
     return np.array(xs), np.array(ys), np.array(cis)
 
 
-def plot_attention_grid(tp_posmap, fp_posmap, n_layers, n_heads,
+def plot_attention_grid(tp_posmap, fp_posmap, oth_posmap, n_layers, n_heads,
                         savepath="attention_grid.pdf", x_min=9, x_max=141):
     fig_w = n_heads * 4
     fig_h = n_layers * 3
     fig, axes = plt.subplots(n_layers, n_heads, figsize=(fig_w, fig_h), sharex=False, sharey=False)
-    fig.suptitle("Attention to Image Tokens (TP: blue, FP: red)", fontsize=60)
+    fig.suptitle("Attention to Image Tokens (TP: green, FP: red, Others: gray)", fontsize=60)
     
     for l in range(n_layers):
         for h in range(n_heads):
             ax = axes[l, h]
             tp_map = tp_posmap[l][h]
             fp_map = fp_posmap[l][h]
+            oth_map = oth_posmap[l][h]
             tp_x, tp_y, tp_ci = smooth_with_ci_from_posmap(tp_map, win=avg_win_size, stride=stride_size)
             fp_x, fp_y, fp_ci = smooth_with_ci_from_posmap(fp_map, win=avg_win_size, stride=stride_size)
+            oth_x, oth_y, oth_ci = smooth_with_ci_from_posmap(oth_map, win=avg_win_size, stride=stride_size)
             
             if tp_x.size > 0:
-                ax.plot(tp_x, tp_y, color="tab:blue", linewidth=1.4)
+                ax.plot(tp_x, tp_y, color="tab:green", linewidth=1.4)
                 ax.fill_between(tp_x, tp_y - tp_ci, tp_y + tp_ci, color="tab:blue", alpha=0.2)
             if fp_x.size > 0:
                 ax.plot(fp_x, fp_y, color="tab:red", linewidth=1.4)
                 ax.fill_between(fp_x, fp_y - fp_ci, fp_y + fp_ci, color="tab:red", alpha=0.2)
+            if oth_x.size > 0:
+                ax.plot(oth_x, oth_y, color="tab:gray", linewidth=1.4)
+                ax.fill_between(oth_x, oth_y - oth_ci, oth_y + oth_ci, color="tab:gray", alpha=0.2)
+                
             ax.set_xlim(x_min, x_max)
             ys_for_limits = []
             if tp_y.size > 0:
@@ -126,9 +135,10 @@ def plot_attention_grid(tp_posmap, fp_posmap, n_layers, n_heads,
     plt.savefig(savepath)
     plt.show()
 
-tp_data, fp_data = aggregate_across_images(files, n_files)
+tp_data, fp_data, oth_data = aggregate_across_images(files, n_files)
 tp_posmap = aggregate_by_position(tp_data, n_layers, n_heads)
 fp_posmap = aggregate_by_position(fp_data, n_layers, n_heads)
+oth_posmap = aggregate_by_position(oth_data, n_layers, n_heads)
 
 
-plot_attention_grid(tp_posmap, fp_posmap, n_layers, n_heads, savepath="attention_grid.pdf")
+plot_attention_grid(tp_posmap, fp_posmap, oth_posmap, n_layers, n_heads, savepath="attention_grid.pdf")
