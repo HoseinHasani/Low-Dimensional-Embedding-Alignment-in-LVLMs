@@ -6,6 +6,7 @@ from glob import glob
 from tqdm import tqdm
 import seaborn as sns
 from scipy.stats import sem
+from collections import Counter
 
 data_dir = "data/all layers all attention tp fp"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
@@ -173,6 +174,67 @@ def plot_position_histograms(tp_data, fp_data, oth_data, bins=32):
     plt.show()
     
     
+def plot_token_class_composition(tp_data, fp_data, oth_data, n_layers,
+                                 n_heads, bin_size=2,
+                                 savepath="token_class_composition.png"):
+    
+
+    def count_positions(data_dict):
+        pos_counter = Counter()
+        for l in range(n_layers):
+            for h in range(n_heads):
+                for pos in data_dict[l][h].keys():
+                    pos_counter[pos] += len(data_dict[l][h][pos])
+        return pos_counter
+
+    tp_counts = count_positions(tp_data)
+    fp_counts = count_positions(fp_data)
+    oth_counts = count_positions(oth_data)
+
+    all_positions = sorted(set(tp_counts.keys()) | set(fp_counts.keys()) | set(oth_counts.keys()))
+    if not all_positions:
+        print("No position data available to plot.")
+        return
+
+    max_pos = max(all_positions)
+    binned_positions = np.arange(0, max_pos + bin_size, bin_size)
+
+    tp_perc, fp_perc, oth_perc = [], [], []
+    for start in binned_positions:
+        end = start + bin_size
+        tp_bin = sum(v for k, v in tp_counts.items() if start <= k < end)
+        fp_bin = sum(v for k, v in fp_counts.items() if start <= k < end)
+        oth_bin = 2*sum(v for k, v in oth_counts.items() if start <= k < end)
+        total = tp_bin + fp_bin + oth_bin
+        if total == 0:
+            tp_perc.append(0)
+            fp_perc.append(0)
+            oth_perc.append(0)
+        else:
+            tp_perc.append(tp_bin / total)
+            fp_perc.append(fp_bin / total)
+            oth_perc.append(oth_bin / total)
+
+    x = np.arange(len(binned_positions))
+    bar_width = 1.0  
+
+    plt.figure(figsize=(18, 6))
+    plt.bar(x, fp_perc, color="tab:red", width=bar_width, label="FP")
+    plt.bar(x, oth_perc, bottom=fp_perc, color="tab:gray", width=bar_width, label="Others", alpha=0.6)
+    plt.bar(x, tp_perc, bottom=np.array(fp_perc) + np.array(oth_perc),
+            color="tab:green", width=bar_width, label="TP")
+
+    plt.xlabel(f"Token Position (binned, bin size = {bin_size})", fontsize=14)
+    plt.ylabel("Percentage of Entries", fontsize=14)
+    plt.title("Composition of TP, FP, and Other per Token Position", fontsize=16)
+    plt.xlim(-1, 0.81*len(binned_positions))
+    plt.ylim(0, 1)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.savefig(savepath, dpi=140)
+    plt.show()
+
+
 
 tp_data, fp_data, oth_data = aggregate_across_images(files, n_files)
 tp_posmap = aggregate_by_position(tp_data, n_layers, n_heads)
@@ -183,3 +245,5 @@ oth_posmap = aggregate_by_position(oth_data, n_layers, n_heads)
 plot_attention_grid(tp_posmap, fp_posmap, oth_posmap, n_layers, n_heads, savepath="attention_grid.pdf")
 
 plot_position_histograms(tp_posmap, fp_posmap, oth_posmap)
+
+plot_token_class_composition(tp_posmap, fp_posmap, oth_posmap, n_layers, n_heads)
