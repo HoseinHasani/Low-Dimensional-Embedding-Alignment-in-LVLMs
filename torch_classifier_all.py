@@ -24,7 +24,7 @@ data_dir = "data/all layers all attention tp fp"
 base_save_dir = "results_all_layers"
 os.makedirs(base_save_dir, exist_ok=True)
 
-dataset_path = None #"cls_data"
+dataset_path = "cls_data__e_True_g_False" #None #"cls_data"
 
 n_files = 3900
 n_layers, n_heads = 32, 32
@@ -39,8 +39,13 @@ fp_replication_factor = 10
 use_entropy = True
 use_gini = False
 
-train_size = 0.7
-test_size = 0.3
+train_size = 0.75
+test_size = 0.25
+
+n_epochs = 2
+weight_decay = 1e-3
+dropout_rate = 0.5
+
 
 normalize_features = True
 classifier_type = "pytorch_mlp" 
@@ -213,12 +218,13 @@ test_loader  = DataLoader(test_ds, batch_size=128, shuffle=False)
 
 
 class MLPClassifierTorch(nn.Module):
-    def __init__(self, input_dim, hidden1=512, hidden2=64):
+    def __init__(self, input_dim, hidden1=512, hidden2=64, dropout_rate=0.3):
         super().__init__()
         self.net = nn.Sequential(
+            nn.Dropout(dropout_rate),
             nn.Linear(input_dim, hidden1),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout_rate),
             nn.Linear(hidden1, hidden2),
             nn.ReLU(),
             nn.Linear(hidden2, 2)
@@ -230,9 +236,11 @@ class MLPClassifierTorch(nn.Module):
 input_dim = X_train_t.shape[1]
 clf = MLPClassifierTorch(input_dim).to(device)
 
+
+
+clf = MLPClassifierTorch(input_dim, dropout_rate=dropout_rate).to(device)
 criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(clf.parameters(), lr=1e-3, weight_decay=1e-3)
-n_epochs = 20
+optimizer = optim.Adam(clf.parameters(), lr=1e-3, weight_decay=weight_decay)
 
 
 train_losses, test_losses = [], []
@@ -271,8 +279,9 @@ for epoch in range(n_epochs):
     print(f"Epoch {epoch+1:02d}/{n_epochs} | Train Loss: {train_loss:.4f} | "
           f"Val Loss: {val_loss:.4f} | Val Acc: {acc:.3f}")
 
-torch.save(clf.state_dict(), os.path.join(model_dir, "pytorch_mlp.pt"))
-print(f"\nModel saved to: {os.path.join(model_dir, 'pytorch_mlp.pt')}")
+torch.save(clf.state_dict(), os.path.join(model_dir, "pytorch_mlp_with_l2.pt"))
+print(f"\nModel saved to: {os.path.join(model_dir, 'pytorch_mlp_with_l2.pt')}")
+
 
 
 clf.eval()
