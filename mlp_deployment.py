@@ -2,6 +2,10 @@ import torch
 import torch.nn as nn
 import numpy as np
 import os
+import pickle
+from glob import glob
+from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+
 
 class MLPClassifierTorch(nn.Module):
     def __init__(self, input_dim, hidden1=512, hidden2=64, dropout_rate=0.5):
@@ -37,6 +41,7 @@ class FPAttentionClassifier:
         self.std = scaler_data["std"].to(self.device)
 
         input_dim = self.mean.numel()
+
         self.model = MLPClassifierTorch(input_dim, dropout_rate=dropout_rate).to(self.device)
         self.model.load_state_dict(torch.load(model_path, map_location=self.device))
         self.model.eval()
@@ -78,7 +83,7 @@ class FPAttentionClassifier:
         token_indices = []
 
         for token_idx, attn in attention_dict.items():
-            if attn is None or attn.shape != (self.n_layers, self.n_heads, -1):
+            if attn is None or attn.shape[0] != self.n_layers or attn.shape[1] != self.n_heads:
                 continue
             feats = self._extract_features_for_token(token_idx, attn)
             all_features.append(feats)
@@ -92,26 +97,113 @@ class FPAttentionClassifier:
         with torch.no_grad():
             logits = self.model(X)
             probs = torch.sigmoid(logits).cpu().numpy()
+            
+        
 
         return {idx: float(p) for idx, p in zip(token_indices, probs)}
     
+
     
-classifier = FPAttentionClassifier(
-    model_path="results_all_layers/pytorch_mlp_exp__ent1_gin0/model/pytorch_mlp_with_l2.pt",
-    scaler_path="results_all_layers/pytorch_mlp_exp__ent1_gin0/model/scaler.pt",
-    n_layers=32,
-    n_heads=32,
-    use_entropy=True,
-    use_gini=False,
-)
 
-sample = {
-    0: np.random.rand(32, 32, 20),
-    3: np.random.rand(32, 32, 20),
-    10: np.random.rand(32, 32, 20),
-    15: np.random.rand(32, 32, 20),
-    27: np.random.rand(32, 32, 20),
-}
 
-preds = classifier.predict(sample)
-print(preds)
+def load_real_attention_samples(data_dir, n_samples=100, n_layers=32, n_heads=32, n_top_k=20):
+    files = sorted(glob(os.path.join(data_dir, "attentions_*.pkl")))
+    samples = []
+
+    for fpath in files[:n_samples]:
+        try:
+            with open(fpath, "rb") as handle:
+                data = pickle.load(handle)
+        except Exception as e:
+            print(f"Skipping {fpath}: {e}")
+            continue
+
+        for cls_name, label in [("fp", 1), ("tp", 0), ("other", 0)]:
+            entries = data.get(cls_name, {}).get("image", [])
+            for e in entries:
+                if not e.get("subtoken_results"):
+                    continue
+                for sub in e["subtoken_results"][:1]:
+                    topk_vals = np.array(sub.get("topk_values"), dtype=float)
+                    if topk_vals.ndim != 3:
+                        continue
+                    idx = int(sub.get("idx", -1))
+                    if idx < 0:
+                        continue
+
+                    topk_vals = topk_vals[..., :n_top_k]
+                    attn_dict = {idx: topk_vals}
+                    samples.append((attn_dict, label))
+    return samples
+
+
+def evaluate_on_real_data(classifier, data_dir, n_eval=100):
+    samples = load_real_attention_samples(data_dir, n_samples=n_eval,
+                                          n_layers=classifier.n_layers,
+                                          n_heads=classifier.n_heads)
+
+    y_true, y_pred = [], []
+
+    for attn_dict, label in samples:
+        preds = classifier.predict(attn_dict)
+        if not preds:
+            continue
+        prob = np.mean(list(preds.values()))  
+        y_true.append(label)
+        y_pred.append(prob)
+
+    if not y_true:
+        print("No valid samples found for evaluation.")
+        return
+    
+    print(np.max(y_pred), np.min(y_pred), np.mean(y_pred), np.std(y_pred))
+    
+    y_bin = (np.array(y_pred) > 0.5).astype(int)
+    acc = accuracy_score(y_true, y_bin)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        y_true, y_bin, average="binary"
+    )
+
+    print(f"\n=== Evaluation on {n_eval} Data ===")
+    print(f"Samples:   {len(y_true)}")
+    print(f"Accuracy:  {acc:.3f}")
+    print(f"Precision: {precision:.3f}")
+    print(f"Recall:    {recall:.3f}")
+    print(f"F1-score:  {f1:.3f}")
+
+    return {
+        "accuracy": acc,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+    }
+
+    
+if __name__ == "__main__":
+    
+    classifier = FPAttentionClassifier(
+        model_path="results_all_layers/pytorch_mlp_exp__ent1_gin0/model/pytorch_mlp_with_l2.pt",
+        scaler_path="results_all_layers/pytorch_mlp_exp__ent1_gin0/model/scaler.pt",
+        n_layers=32,
+        n_heads=32,
+        use_entropy=True,
+        use_gini=False,
+    )
+
+    # Dummy attention data for testing
+    sample = {
+        0: np.random.rand(32, 32, 20),
+        3: np.random.rand(32, 32, 20),
+        10: np.random.rand(32, 32, 20),
+        20: np.random.rand(32, 32, 20),
+    }
+
+    preds = classifier.predict(sample)
+    print("\nPredictions:")
+    for idx, prob in preds.items():
+        print(f"Token {idx:>3}: {prob:.4f}")
+        
+        
+    data_dir = "data/all layers all attention tp fp"
+    print("\nEvaluating classifier on real dataset samples...")
+    results = evaluate_on_real_data(classifier, data_dir, n_eval=200)
