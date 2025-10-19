@@ -34,7 +34,7 @@ position_margin = 2
 n_top_k = 20
 n_subtokens = 1
 eps = 1e-10
-fp_replication_factor = 10
+fp_replication_factor = 9
 
 use_entropy = True
 use_gini = False
@@ -91,8 +91,7 @@ def extract_attention_values(data_dict, cls_):
             if topk_vals.ndim != 3:
                 continue
             idx = int(sub["idx"])
-            mean_vals = np.mean(topk_vals[..., :n_top_k], axis=-1)
-            results.append((idx, mean_vals))
+            results.append((idx, topk_vals[..., :n_top_k]))
     return results
 
 def aggregate_by_position(attention_data, n_layers, n_heads):
@@ -113,37 +112,32 @@ def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_po
             continue
 
         for cls_, label in [("fp", 1), ("tp", 0), ("other", 0)]:
-            attention_data = extract_attention_values(data_dict, cls_)
-            layer_head_data = aggregate_by_position(attention_data, n_layers, n_heads)
-            for idx, mean_vals in attention_data:
+            attention_samples = extract_attention_values(data_dict, cls_)
+            for idx, topk_arr in attention_samples:
                 token_pos = int(idx)
                 if token_pos < min_position or token_pos > max_position:
                     continue
                 features = []
+
                 for l in range(n_layers):
                     for h in range(n_heads):
-                        attention_values = layer_head_data[l][h].get(token_pos, [])
-                        if attention_values:
-                            mean_attention = np.mean(attention_values)
-                            features.append(mean_attention)
-                            if use_entropy:
-                                entropy_vals = compute_entropy(attention_values)
-                                features.append(entropy_vals)
-                            if use_gini:
-                                gini_vals = compute_gini(attention_values)
-                                features.append(gini_vals)
-                if features:
-                    features.append(token_pos / max_position)
-                    X.append(features)
-                    y.append(label)
-                    pos_list.append(token_pos)
-                    cls_list.append(cls_)
+                        vals = topk_arr[l, h, :]    
+                        mean_attention = np.mean(vals)
+                        features.append(mean_attention)
+
+                        if use_entropy:
+                            features.append(compute_entropy(vals))
+                        if use_gini:
+                            features.append(compute_gini(vals))
+                features.append(token_pos / max_position)
+                X.append(features)
+                y.append(label)
+                pos_list.append(token_pos)
+                cls_list.append(cls_)
     if len(X) == 0:
         return None, None, None, None
+    return np.array(X), np.array(y), np.array(pos_list), np.array(cls_list)
 
-    max_len = max(len(x) for x in X)
-    X_padded = np.array([np.pad(x, (0, max_len - len(x)), constant_values=0) for x in X])
-    return X_padded, np.array(y), np.array(pos_list), np.array(cls_list)
 
 
 
@@ -218,7 +212,7 @@ test_loader  = DataLoader(test_ds, batch_size=128, shuffle=False)
 
 
 class MLPClassifierTorch(nn.Module):
-    def __init__(self, input_dim, hidden1=512, hidden2=64, dropout_rate=0.3):
+    def __init__(self, input_dim, hidden1=512, hidden2=64, dropout_rate=0.5):
         super().__init__()
         self.net = nn.Sequential(
             nn.Dropout(dropout_rate),
@@ -227,11 +221,12 @@ class MLPClassifierTorch(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(hidden1, hidden2),
             nn.ReLU(),
-            nn.Linear(hidden2, 2)
+            nn.Linear(hidden2, 1)  
         )
 
     def forward(self, x):
-        return self.net(x)
+        return self.net(x).squeeze(1)
+
 
 input_dim = X_train_t.shape[1]
 clf = MLPClassifierTorch(input_dim).to(device)
@@ -239,7 +234,8 @@ clf = MLPClassifierTorch(input_dim).to(device)
 
 
 clf = MLPClassifierTorch(input_dim, dropout_rate=dropout_rate).to(device)
-criterion = nn.CrossEntropyLoss()
+# criterion = nn.CrossEntropyLoss()
+criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(clf.parameters(), lr=1e-3, weight_decay=weight_decay)
 
 
@@ -250,34 +246,45 @@ for epoch in range(n_epochs):
     clf.train()
     running_loss = 0.0
     for xb, yb in train_loader:
-        xb, yb = xb.to(device), yb.to(device)
+        xb = xb.to(device)
+        yb = yb.float().to(device)  
+
         optimizer.zero_grad()
-        logits = clf(xb)
-        loss = criterion(logits, yb)
+        logits = clf(xb)                       
+        loss = criterion(logits, yb)            
         loss.backward()
         optimizer.step()
+
         running_loss += loss.item() * xb.size(0)
 
     clf.eval()
     val_loss, correct, total = 0.0, 0, 0
     with torch.no_grad():
         for xb, yb in test_loader:
-            xb, yb = xb.to(device), yb.to(device)
+            xb = xb.to(device)
+            yb = yb.float().to(device)
+
             logits = clf(xb)
             loss = criterion(logits, yb)
             val_loss += loss.item() * xb.size(0)
-            preds = logits.argmax(dim=1)
-            correct += (preds == yb).sum().item()
+
+            probs = torch.sigmoid(logits)       
+            preds = (probs > 0.5).long()        
+            correct += (preds == yb.long()).sum().item()
             total += yb.size(0)
 
     train_loss = running_loss / len(train_loader.dataset)
     val_loss = val_loss / len(test_loader.dataset)
     acc = correct / total
+
     train_losses.append(train_loss)
     test_losses.append(val_loss)
 
-    print(f"Epoch {epoch+1:02d}/{n_epochs} | Train Loss: {train_loss:.4f} | "
-          f"Val Loss: {val_loss:.4f} | Val Acc: {acc:.3f}")
+    print(f"Epoch {epoch+1:02d}/{n_epochs} | "
+          f"Train Loss: {train_loss:.4f} | "
+          f"Val Loss: {val_loss:.4f} | "
+          f"Val Acc: {acc:.3f}")
+
 
 torch.save(clf.state_dict(), os.path.join(model_dir, "pytorch_mlp_with_l2.pt"))
 print(f"\nModel saved to: {os.path.join(model_dir, 'pytorch_mlp_with_l2.pt')}")
@@ -289,7 +296,10 @@ y_pred_list, y_true_list = [], []
 with torch.no_grad():
     for xb, yb in test_loader:
         xb = xb.to(device)
-        preds = clf(xb).argmax(dim=1).cpu().numpy()
+        yb = yb.float()
+        logits = clf(xb)
+        probs = torch.sigmoid(logits).cpu().numpy()
+        preds = (probs > 0.5).astype(int).flatten()
         y_pred_list.extend(preds)
         y_true_list.extend(yb.numpy())
 
@@ -325,7 +335,6 @@ plt.tight_layout()
 plt.savefig(os.path.join(results_dir, "training_loss_pytorch.png"), dpi=130)
 plt.close()
 
-
 positions = np.arange(min_position, max_position + 1)
 accs, precisions, recalls, f1s = [], [], [], []
 
@@ -349,7 +358,7 @@ plt.plot(positions, recalls, label="Recall", linewidth=2)
 plt.plot(positions, f1s, label="F1-score", linewidth=2)
 plt.xlabel("Token Position", fontsize=14)
 plt.ylabel("Metric Value", fontsize=14)
-plt.title(f"Classifier Performance over Token Positions (PyTorch MLP)", fontsize=15)
+plt.title("Classifier Performance over Token Positions (PyTorch MLP)", fontsize=15)
 plt.legend(fontsize=12)
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
