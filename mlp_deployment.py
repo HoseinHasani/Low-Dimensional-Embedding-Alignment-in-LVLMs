@@ -4,7 +4,11 @@ import numpy as np
 import os
 import pickle
 from glob import glob
+from tqdm import tqdm
 from sklearn.metrics import precision_recall_fscore_support, accuracy_score
+import matplotlib.pyplot as plt
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
 
 
 class MLPClassifierTorch(nn.Module):
@@ -137,6 +141,21 @@ def load_real_attention_samples(data_dir, n_samples=100, n_layers=32, n_heads=32
     return samples
 
 
+
+def plot_confusion_matrix(y_true, y_pred, classes, normalize=False, title='Confusion Matrix', cmap=plt.cm.Blues):
+    cm = confusion_matrix(y_true, y_pred)
+    if normalize:
+        cm = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt=".2f" if normalize else "d", cmap=cmap, xticklabels=classes, yticklabels=classes)
+    plt.title(title)
+    plt.xlabel('Predicted Label')
+    plt.ylabel('True Label')
+    plt.show()
+
+
+
+
 def evaluate_on_real_data(classifier, data_dir, n_eval=100):
     samples = load_real_attention_samples(data_dir, n_samples=n_eval,
                                           n_layers=classifier.n_layers,
@@ -144,20 +163,20 @@ def evaluate_on_real_data(classifier, data_dir, n_eval=100):
 
     y_true, y_pred = [], []
 
-    for attn_dict, label in samples:
+    for attn_dict, label in tqdm(samples):
         preds = classifier.predict(attn_dict)
         if not preds:
             continue
-        prob = np.mean(list(preds.values()))  
+        prob = list(preds.values())[0]
         y_true.append(label)
         y_pred.append(prob)
 
     if not y_true:
         print("No valid samples found for evaluation.")
         return
-    
+
     print(np.max(y_pred), np.min(y_pred), np.mean(y_pred), np.std(y_pred))
-    
+
     y_bin = (np.array(y_pred) > 0.5).astype(int)
     acc = accuracy_score(y_true, y_bin)
     precision, recall, f1, _ = precision_recall_fscore_support(
@@ -171,12 +190,15 @@ def evaluate_on_real_data(classifier, data_dir, n_eval=100):
     print(f"Recall:    {recall:.3f}")
     print(f"F1-score:  {f1:.3f}")
 
+    plot_confusion_matrix(y_true, y_bin, classes=['Not Target', 'Target'], normalize=False)
+
     return {
         "accuracy": acc,
         "precision": precision,
         "recall": recall,
         "f1": f1,
     }
+
 
     
 if __name__ == "__main__":
@@ -199,11 +221,11 @@ if __name__ == "__main__":
     }
 
     preds = classifier.predict(sample)
-    print("\nPredictions:")
+    print("\nPredictions for a dummy sample:")
     for idx, prob in preds.items():
         print(f"Token {idx:>3}: {prob:.4f}")
         
-        
-    data_dir = "data/all layers all attention tp fp"
-    print("\nEvaluating classifier on real dataset samples...")
-    results = evaluate_on_real_data(classifier, data_dir, n_eval=200)
+    if False:
+        data_dir = "data/all layers all attention tp fp"
+        print("\nEvaluating classifier on real dataset samples...")
+        results = evaluate_on_real_data(classifier, data_dir, n_eval=3000)
