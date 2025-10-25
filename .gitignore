@@ -5,3 +5,4 @@ attention heatmaps/
 *.json
 *.zip
 *.npy
+*.pt
