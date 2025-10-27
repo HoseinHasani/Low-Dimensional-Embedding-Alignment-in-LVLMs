@@ -11,11 +11,13 @@ from sklearn.metrics import (
     confusion_matrix,
     ConfusionMatrixDisplay,
 )
+from sklearn.utils import shuffle
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import TensorDataset, DataLoader
-from scipy.stats import entropy as scipy_entropy
+
+np.random.seed(0)
 
 data_dir = "data/pope/"
 attn_dir = os.path.join(data_dir, "pope_llava_attentions_greedy_all_layers_top20_adversarial")
@@ -32,15 +34,14 @@ use_gini = False
 
 fp_replication_factor = 6
 fn_replication_factor = 2
-train_size = 0.75
-n_epochs = 5
+train_size = 0.5
+n_epochs = 3
 weight_decay = 1e-3
 dropout_rate = 0.5
 batch_size = 64
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 print(f"Using device: {device}")
-
 eps = 1e-10
 
 
@@ -50,6 +51,7 @@ def compute_entropy(values):
     prob = np.array(values, dtype=float)
     prob = prob / (np.sum(prob, axis=-1, keepdims=True) + eps)
     return -np.sum(prob * np.log(prob + eps), axis=-1)
+
 
 def compute_gini(values):
     if len(values) == 0:
@@ -62,21 +64,22 @@ def compute_gini(values):
     gini = np.sum(coef * sorted_p, axis=-1) / (n * np.sum(sorted_p, axis=-1) + eps)
     return np.abs(gini)
 
+
 def load_ground_truths():
-    with open(gt_file, 'r') as f:
+    with open(gt_file, "r") as f:
         gt_data = [json.loads(line) for line in f]
-    return {entry['question_id']: entry['label'].lower() for entry in gt_data}
+    return {entry["question_id"]: entry["label"].lower() for entry in gt_data}
+
 
 def load_responses():
     responses = {}
     for response_file in glob(os.path.join(resp_dir, "*.jsonl")):
-        with open(response_file, 'r') as f:
+        with open(response_file, "r") as f:
             data = json.load(f)
-            image_id = int(data['image_id'])
-            question_id = int(data['question_id'])
-            responses[(image_id, question_id)] = data['caption'].lower()
+            image_id = int(data["image_id"])
+            question_id = int(data["question_id"])
+            responses[(image_id, question_id)] = data["caption"].lower()
     return responses
-
 
 
 def extract_attention_features(data_dict):
@@ -102,22 +105,27 @@ def extract_all_features(files):
         try:
             with open(f, "rb") as handle:
                 data_dict = pickle.load(handle)
-        except Exception as e:
+        except Exception:
             continue
 
         fname = os.path.basename(f)
-        image_id = int(fname.split('_')[1])
-        question_id = int(fname.split('_')[2].split('.')[0])
+        image_id = int(fname.split("_")[1])
+        question_id = int(fname.split("_")[2].split(".")[0])
 
-        gt_label = ground_truths.get(question_id, None).lower()
-        response_label = responses.get((image_id, question_id), None).lower()
+        gt_label = ground_truths.get(question_id, None)
+        resp_label = responses.get((image_id, question_id), None)
+        if not gt_label or not resp_label:
+            print("WRONG FORMAT 1")
+            continue
 
-
-        if gt_label not in ["yes", "no"] or response_label not in ["yes", "no"]:
+        gt_label = gt_label.lower()
+        resp_label = resp_label.lower()
+        if gt_label not in ["yes", "no"] or resp_label not in ["yes", "no"]:
+            print("WRONG FORMAT 2:", gt_label, resp_label)
             continue
 
         gt_bin = 1 if gt_label == "yes" else 0
-        resp_bin = 1 if response_label == "yes" else 0
+        resp_bin = 1 if resp_label == "yes" else 0
 
         attn_list = extract_attention_features(data_dict)
         if len(attn_list) == 0:
@@ -135,13 +143,10 @@ def extract_all_features(files):
                     if use_gini:
                         features.append(compute_gini(vals))
 
-            # add generated response conditioning (yes/no)
             features.append(resp_bin)
-
             X.append(features)
             y.append(gt_bin)
 
-            # categorize FP/TP/FN/TN
             if resp_bin == 1 and gt_bin == 1:
                 cls_list.append("TP")
             elif resp_bin == 1 and gt_bin == 0:
@@ -154,21 +159,25 @@ def extract_all_features(files):
     return np.array(X), np.array(y), np.array(cls_list)
 
 
-
 def balance_fp_fn_samples(X, y, cls_list, fp_factor, fn_factor):
     cls_list = np.array(cls_list)
-    mask_fp = (cls_list == "FP")
-    mask_fn = (cls_list == "FN")
+    mask_fp = cls_list == "FP"
+    mask_fn = cls_list == "FN"
 
     X_fp, y_fp, cls_fp = X[mask_fp], y[mask_fp], cls_list[mask_fp]
     X_fn, y_fn, cls_fn = X[mask_fn], y[mask_fn], cls_list[mask_fn]
 
-    X_bal = np.concatenate([X, np.repeat(X_fp, fp_factor, axis=0), np.repeat(X_fn, fn_factor, axis=0)], axis=0)
-    y_bal = np.concatenate([y, np.repeat(y_fp, fp_factor, axis=0), np.repeat(y_fn, fn_factor, axis=0)], axis=0)
-    cls_bal = np.concatenate([cls_list, np.repeat(cls_fp, fp_factor, axis=0), np.repeat(cls_fn, fn_factor, axis=0)], axis=0)
+    X_bal = np.concatenate(
+        [X, np.repeat(X_fp, fp_factor, axis=0), np.repeat(X_fn, fn_factor, axis=0)], axis=0
+    )
+    y_bal = np.concatenate(
+        [y, np.repeat(y_fp, fp_factor, axis=0), np.repeat(y_fn, fn_factor, axis=0)], axis=0
+    )
+    cls_bal = np.concatenate(
+        [cls_list, np.repeat(cls_fp, fp_factor, axis=0), np.repeat(cls_fn, fn_factor, axis=0)], axis=0
+    )
 
     return X_bal, y_bal, cls_bal
-
 
 
 class MLPClassifierTorch(nn.Module):
@@ -181,23 +190,19 @@ class MLPClassifierTorch(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(512, 64),
             nn.ReLU(),
-            nn.Linear(64, 1)
+            nn.Linear(64, 1),
         )
+
     def forward(self, x):
         return self.net(x).squeeze(1)
 
 
-
 files = sorted(glob(os.path.join(attn_dir, "attentions_*.pkl")))
 X_all, y_all, cls_all = extract_all_features(files)
-X_all, y_all, cls_all = balance_fp_fn_samples(X_all, y_all, cls_all,
-                                              fp_replication_factor, fn_replication_factor)
 
-print(f"Dataset size: {len(y_all)}")
-print("Class composition:")
-unique, counts = np.unique(cls_all, return_counts=True)
-for u, c in zip(unique, counts):
-    print(f"  {u}: {c}")
+print(X_all.shape)
+
+X_all, y_all, cls_all = shuffle(X_all, y_all, cls_all, random_state=42)
 
 n_total = len(X_all)
 n_train = int(n_total * train_size)
@@ -205,16 +210,31 @@ X_train, X_test = X_all[:n_train], X_all[n_train:]
 y_train, y_test = y_all[:n_train], y_all[n_train:]
 cls_train, cls_test = cls_all[:n_train], cls_all[n_train:]
 
+X_train, y_train, cls_train = balance_fp_fn_samples(
+    X_train, y_train, cls_train, fp_replication_factor, fn_replication_factor
+)
+X_test, y_test, cls_test = balance_fp_fn_samples(
+    X_test, y_test, cls_test, fp_replication_factor, fn_replication_factor
+)
+
+print("\nDataset sizes after balancing:")
+print(f"  Train: {len(y_train)}  |  Test: {len(y_test)}")
+for name, cls_split in zip(["Train", "Test"], [cls_train, cls_test]):
+    unique, counts = np.unique(cls_split, return_counts=True)
+    print(f"{name} composition:")
+    for u, c in zip(unique, counts):
+        print(f"  {u}: {c}")
+
+
 X_train_t = torch.tensor(X_train, dtype=torch.float32)
 X_test_t = torch.tensor(X_test, dtype=torch.float32)
 y_train_t = torch.tensor(y_train, dtype=torch.float32)
-y_test_t = torch.tensor(y_train, dtype=torch.float32)
+y_test_t = torch.tensor(y_test, dtype=torch.float32)
 
 mean = X_train_t.mean(dim=0, keepdim=True)
 std = X_train_t.std(dim=0, keepdim=True) + 1e-6
 X_train_t = (X_train_t - mean) / std
-X_test_t = (X_train_t - mean) / std
-
+X_test_t = (X_test_t - mean) / std
 torch.save({"mean": mean, "std": std}, os.path.join(save_base, "scaler.pt"))
 
 train_loader = DataLoader(TensorDataset(X_train_t, y_train_t), batch_size=batch_size, shuffle=True)
@@ -226,7 +246,7 @@ criterion = nn.BCEWithLogitsLoss()
 optimizer = optim.Adam(clf.parameters(), lr=1e-3, weight_decay=weight_decay)
 
 train_losses, val_losses = [], []
-print(f"Training on {len(train_loader.dataset)} samples...")
+print(f"\nTraining on {len(train_loader.dataset)} samples...")
 
 for epoch in range(1, n_epochs + 1):
     clf.train()
@@ -275,7 +295,7 @@ with torch.no_grad():
 y_pred = np.array(y_pred_list)
 y_true = np.array(y_true_list)
 
-precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average='binary')
+precision, recall, f1, _ = precision_recall_fscore_support(y_true, y_pred, average="binary")
 acc = accuracy_score(y_true, y_pred)
 
 print("\n=== Global Metrics ===")
