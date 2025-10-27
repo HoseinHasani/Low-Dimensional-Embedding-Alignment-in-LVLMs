@@ -6,3 +6,4 @@ attention heatmaps/
 *.zip
 *.npy
 *.pt
+*.pkl
