@@ -4,15 +4,21 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import re
 
-mode = "background"   
+mode = "foreground"
+# mode = "background"
+mode = "FGneighbors"
+mode = "just_neighbors"
 
 file_map = {
     "background": "activation_patching_pairs_3to6_and_6to3_background.csv",
-    "foreground": "activation_patching_pairs_3to6_and_6to3_foreground.csv"
+    "foreground": "activation_patching_pairs_3to6_and_6to3_foreground.csv",
+    "FGneighbors": "activation_patching_pairs_pad1_FGneighbors.csv",
+    "just_neighbors": "activation_patching_pairs_pad1_just_neighbors.csv"
 }
 file_path = file_map[mode]
 
 df = pd.read_csv(file_path, sep=",", engine="python")
+df["patches_output"] = pd.to_numeric(df["patches_output"], errors="coerce")
 
 def extract_class(path):
     match = re.search(r'img_(\d+)\.png', str(path))
@@ -31,8 +37,9 @@ def bucket_pred(x):
 
 df["pred_class"] = df["patches_output"].apply(bucket_pred)
 
+# only keep valid pairs (3→6 and 6→3)
 valid_pairs = [(3,6), (6,3)]
-df = df[df[["src_class","tgt_class"]].apply(tuple, axis=1).isin(valid_pairs)]
+df = df[df[["src_class", "tgt_class"]].apply(tuple, axis=1).isin(valid_pairs)]
 
 grouped = (
     df.groupby(["src_class", "tgt_class", "pred_class"])
@@ -42,8 +49,10 @@ grouped = (
     .reindex(columns=["3","6","Other"], fill_value=0)
 )
 
-matrix = grouped.values
+matrix = grouped.values.astype(float)
 matrix = matrix / matrix.sum(axis=1, keepdims=True)
+
+yticklabels = [f"{s} → {t}" for s, t in grouped.index]
 
 plt.figure(figsize=(7,4))
 sns.heatmap(
@@ -53,14 +62,14 @@ sns.heatmap(
     fmt=".2f",
     cbar=True,
     xticklabels=["Pred=3","Pred=6","Pred=Other"],
-    yticklabels=[f"src={s}, tgt={t}" for s,t in grouped.index],
+    yticklabels=yticklabels,
     linewidths=0.5,
     linecolor='gray'
 )
 
 plt.title(f"Confusion Matrix ({mode.capitalize()})", fontsize=16, fontweight='bold', pad=15)
 plt.xlabel("Predicted Class", fontsize=14)
-plt.ylabel("Source → Target Pair", fontsize=14)
+plt.ylabel("Source → Target", fontsize=14)
 plt.xticks(fontsize=12)
 plt.yticks(fontsize=12, rotation=0)
 plt.tight_layout()
