@@ -7,3 +7,4 @@ attention heatmaps/
 *.npy
 *.pt
 *.pkl
+*.csv
