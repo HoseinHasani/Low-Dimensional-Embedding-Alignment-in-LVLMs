@@ -132,6 +132,7 @@ def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_po
     X_padded = np.array([np.pad(x, (0, max_len - len(x)), constant_values=0) for x in X])
     return X_padded, np.array(y), np.array(pos_list), np.array(cls_list)
 
+
 files = sorted(glob(os.path.join(data_dir, "attentions_*.pkl")))
 
 if dataset_path and os.path.exists(f"{dataset_path}/x.npy"):
@@ -144,6 +145,16 @@ else:
     X_all, y_all, pos_all, cls_all = extract_all_features(
         files, n_files, n_layers, n_heads, min_position, max_position
     )
+    
+    if X_all is not None:
+        dataset_path = f"cls_data__e_{use_entropy}_g_{use_gini}"
+        os.makedirs(dataset_path, exist_ok=True)
+        
+        np.save(os.path.join(dataset_path, "x.npy"), X_all)
+        np.save(os.path.join(dataset_path, "y.npy"), y_all)
+        np.save(os.path.join(dataset_path, "pos.npy"), pos_all)
+        np.save(os.path.join(dataset_path, "cls.npy"), cls_all)
+        print(f"Dataset saved in '{dataset_path}/'")
 
 n_total = len(X_all)
 n_train = int(n_total * train_size)

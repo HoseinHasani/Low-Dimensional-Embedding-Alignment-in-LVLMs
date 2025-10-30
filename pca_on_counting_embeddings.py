@@ -7,7 +7,7 @@ from sklearn.decomposition import PCA
 from matplotlib.cm import get_cmap
 
 
-data_path = "data/counting_pca"
+data_path = "data/counting_pca3"
 token_mode = "separator"          # "element", "separator", or "both"
 mean_over_dataset = False   # True: average across experiments; False: concatenate all
 
@@ -149,7 +149,7 @@ fig.suptitle(f"PCA Visualization of Layer Embeddings ({token_mode})",
 plt.subplots_adjust(top=0.90, bottom=0.05, left=0.04, right=0.98,
                     hspace=0.4, wspace=0.25)
 
-out_name = f"layerwise_pca_{token_mode}.png"
+out_name = f"layerwise_pca_{token_mode}_pe.png"
 plt.savefig(out_name, dpi=300, bbox_inches="tight")
 plt.close()
 print(f"Saved PCA visualization as {out_name}")

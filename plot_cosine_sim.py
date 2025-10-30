@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
-data_path = "data/counting_pca3"
+data_path = "data/counting_pca"
 token_mode = "element"    # "element" or "separator"
 nrows, ncols = 4, 7       # grid for 28 layers
 out_name = f"layerwise_cosine_diff_{token_mode}.png"
@@ -92,8 +92,7 @@ sample_exp = experiments[0]
 layer_names = sorted([d for d in os.listdir(sample_exp) if d.startswith("layer_")])
 n_layers = len(layer_names)
 
-fig, axes = plt.subplots(nrows, ncols, figsize=(28, 16))
-axes = axes.flatten()
+
 
 print("Computing cosine similarity matrices...")
 layer_mats = []
@@ -108,6 +107,9 @@ for layer_name in layer_names:
 all_vals = np.concatenate([m.flatten() for m in layer_mats if m is not None])
 vmin, vmax = np.nanmin(all_vals), np.nanmax(all_vals)
 print(f"Color range: {vmin:.3f} to {vmax:.3f}")
+
+fig, axes = plt.subplots(nrows, ncols, figsize=(28, 16))
+axes = axes.flatten()
 
 for i, (layer_name, mat) in enumerate(zip(layer_names[:28], layer_mats[:28])):
     ax = axes[i]

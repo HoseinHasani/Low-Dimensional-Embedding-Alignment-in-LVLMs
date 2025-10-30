@@ -12,7 +12,7 @@ save_dir = "results_position_sweep"
 os.makedirs(save_dir, exist_ok=True)
 
 min_position = 5
-max_position = 150
+max_position = 160
 position_margin = 2
 min_class_samples = 5
 n_files = 8000
@@ -72,7 +72,7 @@ for pos in tqdm(range(min_position, max_position + 1)):
     if min(n_train_tp, n_train_fp, n_test_tp, n_test_fp) < min_class_samples:
         continue
 
-    clf = RandomForestClassifier(n_estimators=200, random_state=42)
+    clf = RandomForestClassifier(n_estimators=200, random_state=42, class_weight='balanced')
     clf.fit(X_train, y_train)
     y_pred = clf.predict(X_test)
 

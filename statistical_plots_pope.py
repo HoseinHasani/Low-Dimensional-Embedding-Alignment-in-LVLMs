@@ -8,6 +8,8 @@ import seaborn as sns
 from scipy.stats import sem, ttest_ind
 import json
 
+attention_type = "image"  # Choose between "image" or "text"
+
 data_dir = "data/pope/"
 attn_dir = os.path.join(data_dir, "pope_llava_attentions_greedy_all_layers_top20_adversarial")
 resp_dir = os.path.join(data_dir, "pope_llava_responses_greedy_all_layers_top20_adversarial")
@@ -15,9 +17,9 @@ gt_file = os.path.join(data_dir, "coco/coco_pope_adversarial.json")
 
 n_layers, n_heads = 32, 32
 n_top_k = 20
-n_select = 5
+n_select = 20
 p_combine_mode = "fisher"  # "fisher" | "min" | "max"
-save_dir = "selected_yesno_attention"
+save_dir = f"selected_pope_attention_{attention_type.title()}"
 os.makedirs(save_dir, exist_ok=True)
 sns.set(style="darkgrid")
 eps = 1e-140
@@ -39,7 +41,7 @@ def load_responses():
     return responses
 
 def extract_attention(data_dict):
-    entries = data_dict.get("attns", {}).get("image", [])
+    entries = data_dict.get("attns", {}).get(attention_type, [])
     if not entries:
         return None
     sub = entries[0]["subtoken_results"][0]
@@ -132,9 +134,17 @@ def plot_selected(selected, tp_stack, fp_stack, fn_stack, tn_stack):
                 [tp_vals.mean(), fp_vals.mean(), fn_vals.mean(), tn_vals.mean()],
                 yerr=[tp_vals.std(), fp_vals.std(), fn_vals.std(), tn_vals.std()],
                 color=["green","red","blue","gray"], capsize=3)
+        
+        min_ylim = min(tp_vals.mean() - tp_vals.std(), fp_vals.mean() - fp_vals.std(),
+                       fn_vals.mean() - fn_vals.std(), tn_vals.mean() - tn_vals.std()) - 4e-5
+        max_ylim = max(tp_vals.mean() + tp_vals.std(), fp_vals.mean() + fp_vals.std(),
+                       fn_vals.mean() + fn_vals.std(), tn_vals.mean() + tn_vals.std()) + 4e-5
+
+        plt.ylim(min_ylim, max_ylim)
+            
         plt.xticks([0,1,2,3], ["TP","FP","FN","TN"])
         plt.ylabel("Attention")
-        plt.title(f"L{l+1} H{h+1} log10(pval)={logp:.2f}")
+        plt.title(f"L{l+1} H{h+1} log10(pval)={logp:.2f} - {attention_type.title()}")
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, f"yesno_L{l}_H{h}_logp{logp:.2f}.png"))
         plt.close()

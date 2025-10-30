@@ -4,7 +4,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 
-data_path = "data/counting_pca"
+data_path = "data/counting_pca3"
 token_mode = "element"   # "element" or "separator"
 nrows, ncols = 4, 7
 out_name = f"layerwise_cosine_with_ref_{token_mode}.png"
@@ -93,12 +93,13 @@ for layer_name in layer_names:
     mat = layer_cosine_similarity(layer_dirs, token_mode)
     layer_mats.append(mat)
 
-all_vals = np.concatenate([m.flatten() for m in layer_mats if m is not None])
+all_vals = np.concatenate([m.flatten() for m in layer_mats[1:-1] if m is not None])
 vmin, vmax = np.nanmin(all_vals), np.nanmax(all_vals)
+vmin = 0.3
 print(f"Color range: {vmin:.3f} to {vmax:.3f}")
 
 # Plot
-for i, (layer_name, mat) in enumerate(zip(layer_names, layer_mats)):
+for i, (layer_name, mat) in enumerate(zip(layer_names[:28], layer_mats[:28])):
     ax = axes[i]
     if mat is None:
         ax.axis("off")

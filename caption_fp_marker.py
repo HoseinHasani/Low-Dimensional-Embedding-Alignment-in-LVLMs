@@ -4,13 +4,11 @@ import json
 import numpy as np
 from glob import glob
 from tqdm import tqdm
-from transformers import AutoTokenizer
 
-tokenizer = AutoTokenizer.from_pretrained("your-model-name")
 
 att_dir = "data/all tokens/attentions"
 resp_dir = "data/all tokens/responses"
-out_dir_txt = "final_results"
+out_dir_txt = "postprocess_results"
 
 os.makedirs(out_dir_txt, exist_ok=True)
 
