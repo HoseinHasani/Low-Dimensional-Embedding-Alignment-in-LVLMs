@@ -324,6 +324,32 @@ plt.tight_layout()
 plt.savefig(os.path.join(results_dir, "confusion_matrix_pytorch.png"), dpi=130)
 plt.close()
 
+
+
+conf_matrix = np.zeros((3, 2), dtype=int)  
+
+for true_label, predicted_label, cls in zip(y_true, y_pred, cls_test):
+    if cls == 'fp':
+        row = 0  # FP
+    elif cls == 'tp':
+        row = 1  # TP
+    else:
+        row = 2  # Other
+
+    col = predicted_label  # 0 or 1 (class 0 or class 1)
+    
+    conf_matrix[row, col] += 1
+
+disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=["Non-FP", "FP"])
+plt.figure(figsize=(5, 5))
+disp.plot(cmap="Blues", values_format="d", colorbar=False)
+plt.title("Confusion Matrix (FP, TP, Other vs. Class 0/1)")
+plt.tight_layout()
+plt.savefig(os.path.join(results_dir, "confusion_matrix_fp_tp_other.png"), dpi=130)
+plt.close()
+
+
+
 plt.figure(figsize=(8, 5))
 plt.plot(train_losses, label="Train Loss")
 plt.plot(test_losses, label="Val Loss")
