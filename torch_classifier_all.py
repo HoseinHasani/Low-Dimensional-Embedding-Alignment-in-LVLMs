@@ -2,6 +2,7 @@ import os
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from glob import glob
 from tqdm import tqdm
 from sklearn.preprocessing import StandardScaler
@@ -327,7 +328,6 @@ plt.close()
 
 
 conf_matrix = np.zeros((3, 2), dtype=int)  
-
 for true_label, predicted_label, cls in zip(y_true, y_pred, cls_test):
     if cls == 'fp':
         row = 0  # FP
@@ -335,19 +335,21 @@ for true_label, predicted_label, cls in zip(y_true, y_pred, cls_test):
         row = 1  # TP
     else:
         row = 2  # Other
-
-    col = predicted_label  # 0 or 1 (class 0 or class 1)
-    
+    col = predicted_label
     conf_matrix[row, col] += 1
 
-disp = ConfusionMatrixDisplay(confusion_matrix=conf_matrix, display_labels=["Non-FP", "FP"])
-plt.figure(figsize=(5, 5))
-disp.plot(cmap="Blues", values_format="d", colorbar=False)
-plt.title("Confusion Matrix (FP, TP, Other vs. Class 0/1)")
-plt.tight_layout()
-plt.savefig(os.path.join(results_dir, "confusion_matrix_fp_tp_other.png"), dpi=130)
-plt.close()
 
+row_labels = ['FP', 'TP', 'Other']
+col_labels = ['Class 0', 'Class 1']
+plt.figure(figsize=(6, 4))
+sns.heatmap(conf_matrix, annot=True, fmt='d', cmap="Blues",
+            xticklabels=col_labels, yticklabels=row_labels, cbar=False)
+plt.title("Confusion Matrix (FP, TP, Other vs. Class 0/1)", fontsize=14)
+plt.xlabel('Predicted Labels', fontsize=12)
+plt.ylabel('True Labels', fontsize=12)
+plt.tight_layout()
+plt.savefig(os.path.join(results_dir, "confusion_matrix_fp_tp_other_seaborn.png"), dpi=130)
+plt.show()
 
 
 plt.figure(figsize=(8, 5))
