@@ -84,6 +84,18 @@ def extract_attention_values(data_dict, cls_):
             results.append((idx, topk_vals[..., :n_top_k]))
     return results
 
+def balance_fp_samples(X, y, pos, cls, factor=5):
+    fp_mask = (y == 1)  # Mask where the class is FP
+    X_fp, y_fp, pos_fp, cls_fp = X[fp_mask], y[fp_mask], pos[fp_mask], cls[fp_mask]
+    
+    # Replicate FP samples based on the factor
+    X_bal = np.concatenate([X, np.repeat(X_fp, factor, axis=0)], axis=0)
+    y_bal = np.concatenate([y, np.repeat(y_fp, factor, axis=0)], axis=0)
+    pos_bal = np.concatenate([pos, np.repeat(pos_fp, factor, axis=0)], axis=0)
+    cls_bal = np.concatenate([cls, np.repeat(cls_fp, factor, axis=0)], axis=0)
+    
+    return X_bal, y_bal, pos_bal, cls_bal
+
 # ------------------ FEATURE EXTRACTION ------------------
 
 def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_position):
@@ -139,6 +151,12 @@ else:
     np.save(f"{dataset_path}/pos.npy", pos_all)
     np.save(f"{dataset_path}/cls.npy", cls_all)
 
+# ------------------ BALANCE FP SAMPLES ------------------
+
+# Balance FP samples in training and testing datasets
+X_train, y_train, pos_train, cls_train = balance_fp_samples(X_all[:n_train], y_all[:n_train], pos_all[:n_train], cls_all[:n_train], fp_replication_factor)
+X_test, y_test, pos_test, cls_test = balance_fp_samples(X_all[n_train:], y_all[n_train:], pos_all[n_train:], cls_all[n_train:], fp_replication_factor)
+
 # ------------------ SPLIT ------------------
 
 n_total = len(X_all)
@@ -190,34 +208,20 @@ class MLPClassifierMulticlass(nn.Module):
     def forward(self, x):
         return self.net(x)
 
-
 input_dim = X_train_t.shape[1]
 clf = MLPClassifierMulticlass(input_dim, dropout_rate=dropout_rate).to(device)
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(clf.parameters(), lr=1e-3, weight_decay=weight_decay)
 
-# ------------------ TRAIN ------------------
+# ------------------ TRAINING ------------------
+
+optimizer = optim.Adam(clf.parameters(), lr=1e-4, weight_decay=weight_decay)
+criterion = nn.CrossEntropyLoss()
 
 train_losses, val_losses = [], []
-print(f"\nTraining multiclass classifier for {n_epochs} epochs...")
-
 for epoch in range(n_epochs):
     clf.train()
     running_loss = 0.0
     for xb, yb in train_loader:
         xb, yb = xb.to(device), yb.to(device)
-        
-        # Replicate FP class if needed
-        if fp_replication_factor > 1:
-            idx_fp = (yb == 0).nonzero(as_tuple=True)[0]
-            n_fp = idx_fp.size(0)
-            if n_fp > 0:
-                idx_fp_rep = idx_fp.repeat(fp_replication_factor)
-                xb_fp_rep = xb[idx_fp_rep]
-                yb_fp_rep = yb[idx_fp_rep]
-                xb = torch.cat([xb, xb_fp_rep], dim=0)
-                yb = torch.cat([yb, yb_fp_rep], dim=0)
-        
         optimizer.zero_grad()
         logits = clf(xb)
         loss = criterion(logits, yb)
@@ -225,8 +229,11 @@ for epoch in range(n_epochs):
         optimizer.step()
         running_loss += loss.item() * xb.size(0)
 
+    # Validation
     clf.eval()
-    val_loss, correct, total = 0.0, 0, 0
+    val_loss = 0.0
+    correct = 0
+    total = 0
     with torch.no_grad():
         for xb, yb in test_loader:
             xb, yb = xb.to(device), yb.to(device)
