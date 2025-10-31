@@ -19,13 +19,13 @@ from torch.utils.data import TensorDataset, DataLoader
 
 # ------------------ CONFIG ------------------
 
-data_dir = "data/all_layers_all_attention_tp_fp"
+data_dir = "data/all layers all attention tp fp"
 base_save_dir = "results_multiclass"
 os.makedirs(base_save_dir, exist_ok=True)
 
 dataset_path = "cls_data_multiclass"
 
-n_files = 3900
+n_files = 3960
 n_layers, n_heads = 32, 32
 min_position = 5
 max_position = 150
@@ -44,6 +44,8 @@ n_epochs = 3
 weight_decay = 1e-3
 dropout_rate = 0.5
 normalize_features = True
+
+fp_replication_factor = 2  # Replication factor for balancing FP class
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"\nUsing device: {device}")
@@ -204,6 +206,18 @@ for epoch in range(n_epochs):
     running_loss = 0.0
     for xb, yb in train_loader:
         xb, yb = xb.to(device), yb.to(device)
+        
+        # Replicate FP class if needed
+        if fp_replication_factor > 1:
+            idx_fp = (yb == 0).nonzero(as_tuple=True)[0]
+            n_fp = idx_fp.size(0)
+            if n_fp > 0:
+                idx_fp_rep = idx_fp.repeat(fp_replication_factor)
+                xb_fp_rep = xb[idx_fp_rep]
+                yb_fp_rep = yb[idx_fp_rep]
+                xb = torch.cat([xb, xb_fp_rep], dim=0)
+                yb = torch.cat([yb, yb_fp_rep], dim=0)
+        
         optimizer.zero_grad()
         logits = clf(xb)
         loss = criterion(logits, yb)
@@ -292,5 +306,24 @@ plt.title("Multiclass MLP Training Loss")
 plt.tight_layout()
 plt.savefig(os.path.join(base_save_dir, "training_loss_curve.png"), dpi=130)
 plt.close()
+
+# ------------------ PERFORMANCE OVER TOKEN POSITION ------------------
+
+token_positions = np.unique(pos_test)
+accuracy_over_position = []
+
+for pos in token_positions:
+    indices = pos_test == pos
+    acc = accuracy_score(y_test[indices], y_pred[indices])
+    accuracy_over_position.append(acc)
+
+plt.figure(figsize=(8, 5))
+plt.plot(token_positions, accuracy_over_position, marker='o')
+plt.xlabel("Token Position")
+plt.ylabel("Accuracy")
+plt.title("Classifier Performance over Token Positions")
+plt.tight_layout()
+plt.savefig(os.path.join(base_save_dir, "performance_over_positions.png"), dpi=130)
+plt.show()
 
 print(f"\nResults saved in:\n  {base_save_dir}")
