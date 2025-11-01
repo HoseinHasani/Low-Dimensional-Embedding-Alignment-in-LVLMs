@@ -38,14 +38,14 @@ use_entropy = True
 use_gini = False
 
 train_size = 0.75
-test_size = 0.25
+# test_size = 0.25
 
 n_epochs = 3
 weight_decay = 1e-3
 dropout_rate = 0.5
 normalize_features = True
 
-fp_replication_factor = 2  # Replication factor for balancing FP class
+fp_replication_factor = 5  
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(f"\nUsing device: {device}")
@@ -85,10 +85,9 @@ def extract_attention_values(data_dict, cls_):
     return results
 
 def balance_fp_samples(X, y, pos, cls, factor=5):
-    fp_mask = (y == 1)  # Mask where the class is FP
+    fp_mask = (y == 0)
     X_fp, y_fp, pos_fp, cls_fp = X[fp_mask], y[fp_mask], pos[fp_mask], cls[fp_mask]
     
-    # Replicate FP samples based on the factor
     X_bal = np.concatenate([X, np.repeat(X_fp, factor, axis=0)], axis=0)
     y_bal = np.concatenate([y, np.repeat(y_fp, factor, axis=0)], axis=0)
     pos_bal = np.concatenate([pos, np.repeat(pos_fp, factor, axis=0)], axis=0)
@@ -153,25 +152,38 @@ else:
 
 # ------------------ BALANCE FP SAMPLES ------------------
 
+n_total = len(X_all)
+n_train = int(n_total * train_size)
+
 # Balance FP samples in training and testing datasets
 X_train, y_train, pos_train, cls_train = balance_fp_samples(X_all[:n_train], y_all[:n_train], pos_all[:n_train], cls_all[:n_train], fp_replication_factor)
 X_test, y_test, pos_test, cls_test = balance_fp_samples(X_all[n_train:], y_all[n_train:], pos_all[n_train:], cls_all[n_train:], fp_replication_factor)
 
 # ------------------ SPLIT ------------------
 
-n_total = len(X_all)
-n_train = int(n_total * train_size)
-X_train, X_test = X_all[:n_train], X_all[-(n_total - n_train):]
-y_train, y_test = y_all[:n_train], y_all[-(n_total - n_train):]
-pos_train, pos_test = pos_all[:n_train], pos_all[-(n_total - n_train):]
-cls_train, cls_test = cls_all[:n_train], cls_all[-(n_total - n_train):]
+# X_train, X_test = X_all[:n_train], X_all[-(n_total - n_train):]
+# y_train, y_test = y_all[:n_train], y_all[-(n_total - n_train):]
+# pos_train, pos_test = pos_all[:n_train], pos_all[-(n_total - n_train):]
+# cls_train, cls_test = cls_all[:n_train], cls_all[-(n_total - n_train):]
 
 # ------------------ STATS ------------------
 
 unique, counts = np.unique(y_all, return_counts=True)
-print("\nClass distribution (entire dataset):")
+print("\nClass distribution (Raw dataset):")
 for u, c in zip(unique, counts):
     print(f"  Class {u}: {c} samples")
+
+
+unique, counts = np.unique(y_train, return_counts=True)
+print("\nClass distribution (Train dataset):")
+for u, c in zip(unique, counts):
+    print(f"  Class {u}: {c} samples")
+    
+unique, counts = np.unique(y_test, return_counts=True)
+print("\nClass distribution (Test dataset):")
+for u, c in zip(unique, counts):
+    print(f"  Class {u}: {c} samples")
+    
 
 # ------------------ NORMALIZATION ------------------
 
@@ -202,7 +214,7 @@ class MLPClassifierMulticlass(nn.Module):
             nn.Dropout(dropout_rate),
             nn.Linear(hidden1, hidden2),
             nn.ReLU(),
-            nn.Linear(hidden2, 3)  # 3 classes
+            nn.Linear(hidden2, 3)  
         )
 
     def forward(self, x):
