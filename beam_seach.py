@@ -59,23 +59,28 @@ def sample_with_ensemble(
     eos_token_id = eos_token_id if eos_token_id is not None else self.generation_config.eos_token_id
     if isinstance(eos_token_id, int):
         eos_token_id = [eos_token_id]
-    eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device)
+    eos_set = set(eos_token_id)
+
     return_dict_in_generate = (
         return_dict_in_generate
         if return_dict_in_generate is not None
         else self.generation_config.return_dict_in_generate
     )
 
+    # final sequence and model state
     final_input_ids = input_ids.clone()
-    model_kwargs_main = model_kwargs.copy()
+    model_kwargs_main = copy.deepcopy(model_kwargs)
+
     finished = False
 
+    # We do not collect global scores/attentions across the whole response in this version,
+    # but we keep per-candidate per-token decoder attentions for the evaluator.
     while not finished:
         candidate_outputs = []
         candidate_attentions = []
-        candidate_scores = []
+        candidate_model_kwargs = []
 
-        # generate ensemble_size pseudo-sentences
+        # sequentially sample ensemble candidates (each up to pseudo_sentence_length tokens)
         for _ in range(ensemble_size):
             model_kwargs_tmp = copy.deepcopy(model_kwargs_main)
             input_tmp = final_input_ids.clone()
@@ -83,12 +88,14 @@ def sample_with_ensemble(
             token_count = 0
             eos_hit = False
 
+            # generate one pseudo-sentence for this candidate
             while token_count < pseudo_sentence_length and not eos_hit:
                 model_inputs = self.prepare_inputs_for_generation(input_tmp, **model_kwargs_tmp)
                 outputs = self(
                     **model_inputs,
                     return_dict=True,
                     output_attentions=True,
+                    output_hidden_states=False,
                 )
 
                 next_token_logits = outputs.logits[:, -1, :]
@@ -99,54 +106,87 @@ def sample_with_ensemble(
 
                 input_tmp = torch.cat([input_tmp, next_tokens[:, None]], dim=-1)
 
-                # collect attentions
+                # collect per-step attentions (store per-token attention objects)
                 if self.config.is_encoder_decoder:
                     decoder_attn_tmp.append(outputs.cross_attentions)
                 else:
                     decoder_attn_tmp.append(outputs.attentions)
 
+                # update the temporary model kwargs to reflect autoregressive state for this candidate
                 model_kwargs_tmp = self._update_model_kwargs_for_generation(
                     outputs, model_kwargs_tmp, is_encoder_decoder=self.config.is_encoder_decoder
                 )
 
-                if any(next_tokens[0].item() == e for e in eos_token_id):
+                # check EOS in this token (works for batch size >=1; we treat candidate per-batch identically)
+                # NOTE: this code assumes batch dimension is present; we treat token-wise EOS presence as ending candidate.
+                # if any token in next_tokens is an EOS, mark eos_hit (typical case: batch size 1).
+                if any(int(t.item()) in eos_set for t in next_tokens.view(-1)):
                     eos_hit = True
+
                 token_count += 1
 
             candidate_outputs.append(input_tmp)
             candidate_attentions.append(decoder_attn_tmp)
+            candidate_model_kwargs.append(model_kwargs_tmp)
 
-        # evaluate ensemble
+        # evaluate candidates and pick best (assumes higher score == better / less hallucinated)
+        candidate_scores = []
         for i in range(ensemble_size):
+            # pass the incremental tokens (full sequence is okay; evaluator can use suffix if desired)
             score = sentence_evaluator(candidate_outputs[i], candidate_attentions[i])
-            candidate_scores.append(score)
+            candidate_scores.append(float(score))
 
-        best_idx = int(torch.tensor(candidate_scores).argmax())
-        best_tokens = candidate_outputs[best_idx][:, final_input_ids.shape[1]:]
-        final_input_ids = candidate_outputs[best_idx]
+        best_idx = int(torch.tensor(candidate_scores).argmax().item())
 
-        model_kwargs_main = self._update_model_kwargs_for_generation(
-            outputs, model_kwargs_main, is_encoder_decoder=self.config.is_encoder_decoder
-        )
+        # append the chosen candidate's new tokens to final_input_ids
+        # compute slice of newly produced tokens
+        start_pos = final_input_ids.shape[1]
+        best_full = candidate_outputs[best_idx]
+        best_new_tokens = best_full[:, start_pos:]  # may be shorter than pseudo_sentence_length if EOS hit
+        final_input_ids = best_full  # adopt the chosen candidate's full sequence
+        model_kwargs_main = candidate_model_kwargs[best_idx]  # adopt the chosen candidate's model state
 
-        # stop if EOS seen or stopping criteria met
-        if any(t.item() in eos_token_id for t in best_tokens[0]) or stopping_criteria(final_input_ids, None):
+        # stream tokens if requested
+        if streamer is not None:
+            streamer.put(best_new_tokens.cpu())
+
+        # stop if chosen candidate contained EOS or stopping criteria met
+        # check EOS presence in newly appended tokens
+        eos_in_best = any(int(t.item()) in eos_set for t in best_new_tokens.view(-1))
+        if eos_in_best:
             finished = True
 
-        if streamer is not None:
-            streamer.put(best_tokens.cpu())
+        # call stopping_criteria with scores placeholder (empty tuple) to match expected signature
+        if stopping_criteria(final_input_ids, ()):
+            finished = True
 
     if streamer is not None:
         streamer.end()
 
+    # return with correct output class depending on model type
     if return_dict_in_generate:
-        return SampleDecoderOnlyOutput(
-            sequences=final_input_ids,
-            attentions=None,
-            hidden_states=None,
-        )
+        if self.config.is_encoder_decoder:
+            # we don't currently collect encoder_attentions/hidden_states or decoder_hidden_states here;
+            # return None for those fields (caller can adapt to collect if needed).
+            return SampleEncoderDecoderOutput(
+                sequences=final_input_ids,
+                scores=None,
+                encoder_attentions=None,
+                encoder_hidden_states=None,
+                decoder_attentions=None,
+                cross_attentions=None,
+                decoder_hidden_states=None,
+            )
+        else:
+            return SampleDecoderOnlyOutput(
+                sequences=final_input_ids,
+                scores=None,
+                attentions=None,
+                hidden_states=None,
+            )
     else:
         return final_input_ids
+
 
 
 
