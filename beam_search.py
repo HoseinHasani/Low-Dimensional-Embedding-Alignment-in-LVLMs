@@ -29,6 +29,38 @@ from transformers import AutoTokenizer
 import os
 import matplotlib.pyplot as plt 
 
+
+def sentence_evaluator(
+    candidate_output_ids,
+    candidate_attentions,
+    classifier,
+    image_token_index=IMAGE_TOKEN_INDEX,
+    image_tokens_count=576,
+    topk=20,
+    layer_start=0,
+    layer_end=32,
+):
+    try:
+        image_idx = candidate_output_ids[0].tolist().index(image_token_index)
+    except ValueError:
+        return -float("inf")
+
+    all_indices = list(range(image_idx + image_tokens_count, candidate_output_ids.shape[1]))
+    all_attn = extract_top_attentions_by_steps(
+        candidate_attentions,
+        all_indices,
+        image_idx,
+        image_tokens_count,
+        topk=topk,
+        layer_start=layer_start,
+        layer_end=layer_end,
+    )
+    preds = classifier.predict(all_attn)
+    p_faithful = preds[:, 1] if preds.ndim > 1 and preds.shape[1] == 2 else 1 - preds
+    return float(np.mean(p_faithful))
+
+
+
 def sample_with_ensemble(
     self,
     input_ids: torch.LongTensor,
