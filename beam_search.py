@@ -3,7 +3,8 @@ import inspect
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Union
-
+import os
+import sys
 import torch
 import torch.distributed as dist
 from torch import nn
@@ -18,6 +19,9 @@ from transformers.generation.stopping_criteria import (
 )
 import transformers
 from transformers.generation.utils import SampleOutput, SampleEncoderDecoderOutput, SampleDecoderOnlyOutput
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from classifier.mlp_deployment import FPAttentionClassifier
 
 
 from transformers import CLIPProcessor, CLIPModel
@@ -28,45 +32,138 @@ from transformers import AutoTokenizer
 
 import os
 import matplotlib.pyplot as plt 
+from llava.constants import IMAGE_TOKEN_INDEX
+import numpy as np
+
+
+def extract_top_attentions_by_steps(all_attentions, token_indices, image_token_index, image_tokens_count,
+                                    topk=5, layer_start=0, layer_end=14, aggregate=True):
+    """
+    Extract top-k attended image and text tokens for each TP/FP token's subtoken steps.
+
+    Args:
+        all_attentions: tuple of length n_generated, each element is a list of layer attentions
+                        [layer0, layer1, ...], each [batch, heads, seq, seq]
+        token_indices: list of lists of subtoken indices for TP/FP tokens
+        image_token_index: starting index of image tokens in the sequence
+        image_tokens_count: number of image tokens in the sequence
+        topk: number of top tokens to return
+        layer_start, layer_end: layers to average (inclusive)
+        aggregate: if True, averages over subtokens at the end;
+                   if False, keeps each subtoken result separately.
+
+    Returns:
+        dict with keys:
+            {
+                "image": [{"token_indices": [...],
+                           "subtoken_results": [{"idx": int, "topk_indices": [...], "topk_values": [...]}],
+                           "mean_topk_values": [...], "mean_topk_indices": [...]}],
+                "text":  [ ... same structure ... ]
+            }
+    """
+
+    results = {}
+    batch_size = all_attentions[0][0].shape[0]
+    assert batch_size == 1, "Only batch size 1 supported."
+
+    n_layers_total = len(all_attentions[0])
+    layer_end = min(layer_end, n_layers_total - 1)
+    
+    token_indices = np.ravel(token_indices)
+
+    for idx in token_indices:
+
+        # (num_layers, B, H, S, S)
+        attn_matrix = all_attentions[idx][layer_start:layer_end + 1]
+        target_attn_vec = [attn_matrix[i][0].cpu().numpy() for i in range(len(attn_matrix)) ]  
+        target_attn_vec = np.array(target_attn_vec).squeeze()
+
+        image_attn = target_attn_vec[..., image_token_index:image_token_index + image_tokens_count]
+
+        topk_indices = np.argsort(image_attn, axis=-1)[..., -topk:][..., ::-1]
+
+        topk_values = np.take_along_axis(image_attn, topk_indices, axis=-1)
+
+        results[idx] = topk_values
+
+    return results
+
 
 
 def sentence_evaluator(
-    candidate_output_ids,
     candidate_attentions,
     classifier,
-    image_token_index=IMAGE_TOKEN_INDEX,
+    token_offset,
+    image_token_index=35,
     image_tokens_count=576,
     topk=20,
     layer_start=0,
     layer_end=32,
+    threshold=0.5
 ):
-    try:
-        image_idx = candidate_output_ids[0].tolist().index(image_token_index)
-    except ValueError:
-        return -float("inf")
 
-    all_indices = list(range(image_idx + image_tokens_count, candidate_output_ids.shape[1]))
+    all_indices = [[i] for i in range(len(candidate_attentions))]
     all_attn = extract_top_attentions_by_steps(
         candidate_attentions,
         all_indices,
-        image_idx,
+        image_token_index,
         image_tokens_count,
         topk=topk,
         layer_start=layer_start,
         layer_end=layer_end,
     )
-    preds = classifier.predict(all_attn)
-    p_faithful = preds[:, 1] if preds.ndim > 1 and preds.shape[1] == 2 else 1 - preds
-    return float(np.mean(p_faithful))
 
+    shifted_attn = {k + token_offset: v for k,v in all_attn.items()}
+    preds = classifier.predict(shifted_attn)
+    n_fp = np.sum([preds[k] > threshold for k in preds.keys()])
+    return -n_fp
+
+
+# -------------------------- Helpers --------------------------
+def _clone_past_key_values(past_key_values):
+    """Clone a tuple of past_key_values tensors safely (detach + clone)."""
+    if past_key_values is None:
+        return None
+    return tuple(tuple(p.detach().clone() for p in layer) for layer in past_key_values)
+
+def _detach_and_clone_model_kwargs(model_kwargs, device=None):
+    """Shallow copy model_kwargs but deep-clone its tensor values."""
+    mk = {}
+    for k, v in model_kwargs.items():
+        if k == "past_key_values":
+            mk[k] = _clone_past_key_values(v)
+        elif isinstance(v, torch.Tensor):
+            mk[k] = v.detach().clone()
+        elif isinstance(v, (list, tuple)):
+            mk[k] = type(v)(
+                (item.detach().clone() if isinstance(item, torch.Tensor) else item)
+                for item in v
+            )
+        else:
+            mk[k] = copy.deepcopy(v)
+    if device is not None and "past_key_values" in mk and mk["past_key_values"] is not None:
+        mk["past_key_values"] = tuple(
+            tuple(t.to(device) for t in layer) for layer in mk["past_key_values"]
+        )
+    return mk
+
+def _assert_cache_alignment(model_kwargs, input_ids, image_tokens_count=576, tolerance=4):
+    pk = model_kwargs.get("past_key_values", None)
+    if pk is None:
+        return
+    cached_len = pk[0][0].shape[-2]
+    if abs(cached_len - (input_ids.shape[1] + image_tokens_count)) > tolerance:
+        print(f"[WARN] Cache length {cached_len} != expected {input_ids.shape[1] + image_tokens_count}")
+
+# --------------------------------------------------------------
 
 
 def sample_with_ensemble(
     self,
     input_ids: torch.LongTensor,
-    sentence_evaluator: Callable,
-    ensemble_size: int = 4,
+    ensemble_size: int = 5,
     pseudo_sentence_length: int = 20,
+    search_start: int = 2,
     logits_processor: Optional[LogitsProcessorList] = None,
     stopping_criteria: Optional[StoppingCriteriaList] = None,
     logits_warper: Optional[LogitsProcessorList] = None,
@@ -80,18 +177,33 @@ def sample_with_ensemble(
     synced_gpus: bool = False,
     streamer: Optional["BaseStreamer"] = None,
     **model_kwargs,
-) -> Union[SampleOutput, torch.LongTensor]:
+):
+    """
+    Ensemble-guided sampling with correct past_key_values handling.
+    """
 
-    logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
-    stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
+    # ---------- Classifier ----------
+    classifier = FPAttentionClassifier(
+        model_path="/home/rz15dire/Ensemble/experiments/eval/classifier_outputs/llava_temp1/pytorch_mlp_exp__ent1_gin0/model/pytorch_mlp_with_l2.pt",
+        scaler_path="/home/rz15dire/Ensemble/experiments/eval/classifier_outputs/llava_temp1/pytorch_mlp_exp__ent1_gin0/model/scaler.pt",
+        n_layers=32,
+        n_heads=32,
+        use_entropy=True,
+        use_gini=False,
+    )
+
+    # ---------- Setup ----------
+    logits_processor = logits_processor or LogitsProcessorList()
+    logits_warper = logits_warper or LogitsProcessorList()
+    stopping_criteria = stopping_criteria or StoppingCriteriaList()
     if max_length is not None:
         stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
-    logits_warper = logits_warper if logits_warper is not None else LogitsProcessorList()
-    pad_token_id = pad_token_id if pad_token_id is not None else self.generation_config.pad_token_id
-    eos_token_id = eos_token_id if eos_token_id is not None else self.generation_config.eos_token_id
+
+    pad_token_id = pad_token_id or self.generation_config.pad_token_id
+    eos_token_id = eos_token_id or self.generation_config.eos_token_id
     if isinstance(eos_token_id, int):
         eos_token_id = [eos_token_id]
-    eos_set = set(eos_token_id)
+    eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device)
 
     return_dict_in_generate = (
         return_dict_in_generate
@@ -99,36 +211,47 @@ def sample_with_ensemble(
         else self.generation_config.return_dict_in_generate
     )
 
-    # final sequence and model state
+    # ---------- Initialize ----------
     final_input_ids = input_ids.clone()
-    model_kwargs_main = copy.deepcopy(model_kwargs)
-
+    model_kwargs_main = model_kwargs.copy()
     finished = False
+    total_generated = 0
 
-    # We do not collect global scores/attentions across the whole response in this version,
-    # but we keep per-candidate per-token decoder attentions for the evaluator.
+    # ---------- Phase 1: Warm-up normal sampling ----------
+    while total_generated < search_start and not finished:
+        model_inputs = self.prepare_inputs_for_generation(final_input_ids, **model_kwargs_main)
+        outputs = self(**model_inputs, return_dict=True)
+        next_token_logits = outputs.logits[:, -1, :]
+        next_token_scores = logits_processor(final_input_ids, next_token_logits)
+        next_token_scores = logits_warper(final_input_ids, next_token_scores)
+        probs = F.softmax(next_token_scores, dim=-1)
+        next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
+
+        final_input_ids = torch.cat([final_input_ids, next_tokens[:, None]], dim=-1)
+        model_kwargs_main = self._update_model_kwargs_for_generation(
+            outputs, model_kwargs_main, is_encoder_decoder=self.config.is_encoder_decoder
+        )
+
+        total_generated += 1
+        if next_tokens[0].item() in eos_token_id:
+            finished = True
+        if streamer is not None:
+            streamer.put(next_tokens.cpu())
+
+    # ---------- Phase 2: Ensemble-guided sampling ----------
     while not finished:
-        candidate_outputs = []
-        candidate_attentions = []
-        candidate_model_kwargs = []
+        candidate_outputs, candidate_attentions, candidate_scores, candidate_model_kwargs = [], [], [], []
 
-        # sequentially sample ensemble candidates (each up to pseudo_sentence_length tokens)
         for _ in range(ensemble_size):
-            model_kwargs_tmp = copy.deepcopy(model_kwargs_main)
+            # Make a fully independent copy of the current model state
+            model_kwargs_tmp = _detach_and_clone_model_kwargs(model_kwargs_main, device=next(self.parameters()).device)
             input_tmp = final_input_ids.clone()
-            decoder_attn_tmp = []
-            token_count = 0
-            eos_hit = False
 
-            # generate one pseudo-sentence for this candidate
+            decoder_attn_tmp, token_count, eos_hit = [], 0, False
+
             while token_count < pseudo_sentence_length and not eos_hit:
                 model_inputs = self.prepare_inputs_for_generation(input_tmp, **model_kwargs_tmp)
-                outputs = self(
-                    **model_inputs,
-                    return_dict=True,
-                    output_attentions=True,
-                    output_hidden_states=False,
-                )
+                outputs = self(**model_inputs, return_dict=True, output_attentions=True)
 
                 next_token_logits = outputs.logits[:, -1, :]
                 next_token_scores = logits_processor(input_tmp, next_token_logits)
@@ -137,89 +260,57 @@ def sample_with_ensemble(
                 next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
 
                 input_tmp = torch.cat([input_tmp, next_tokens[:, None]], dim=-1)
-
-                # collect per-step attentions (store per-token attention objects)
-                if self.config.is_encoder_decoder:
-                    decoder_attn_tmp.append(outputs.cross_attentions)
-                else:
-                    decoder_attn_tmp.append(outputs.attentions)
-
-                # update the temporary model kwargs to reflect autoregressive state for this candidate
+                decoder_attn_tmp.append(
+                    outputs.cross_attentions if self.config.is_encoder_decoder else outputs.attentions
+                )
                 model_kwargs_tmp = self._update_model_kwargs_for_generation(
                     outputs, model_kwargs_tmp, is_encoder_decoder=self.config.is_encoder_decoder
                 )
 
-                # check EOS in this token (works for batch size >=1; we treat candidate per-batch identically)
-                # NOTE: this code assumes batch dimension is present; we treat token-wise EOS presence as ending candidate.
-                # if any token in next_tokens is an EOS, mark eos_hit (typical case: batch size 1).
-                if any(int(t.item()) in eos_set for t in next_tokens.view(-1)):
+                if next_tokens[0].item() in eos_token_id:
                     eos_hit = True
-
                 token_count += 1
 
             candidate_outputs.append(input_tmp)
             candidate_attentions.append(decoder_attn_tmp)
             candidate_model_kwargs.append(model_kwargs_tmp)
 
-        # evaluate candidates and pick best (assumes higher score == better / less hallucinated)
-        candidate_scores = []
+        # ---------- Evaluate candidates ----------
         for i in range(ensemble_size):
-            # pass the incremental tokens (full sequence is okay; evaluator can use suffix if desired)
-            score = sentence_evaluator(candidate_outputs[i], candidate_attentions[i])
-            candidate_scores.append(float(score))
+            candidate_scores.append(
+                sentence_evaluator(candidate_attentions[i], classifier, total_generated)
+            )
 
-        best_idx = int(torch.tensor(candidate_scores).argmax().item())
+        best_idx = int(torch.tensor(candidate_scores).argmax())
 
-        # append the chosen candidate's new tokens to final_input_ids
-        # compute slice of newly produced tokens
-        start_pos = final_input_ids.shape[1]
-        best_full = candidate_outputs[best_idx]
-        best_new_tokens = best_full[:, start_pos:]  # may be shorter than pseudo_sentence_length if EOS hit
-        final_input_ids = best_full  # adopt the chosen candidate's full sequence
-        model_kwargs_main = candidate_model_kwargs[best_idx]  # adopt the chosen candidate's model state
+        # ---------- Adopt best candidate state ----------
+        final_input_ids = candidate_outputs[best_idx]
+        model_kwargs_main = _detach_and_clone_model_kwargs(candidate_model_kwargs[best_idx], device=next(self.parameters()).device)
 
-        # stream tokens if requested
+        _assert_cache_alignment(model_kwargs_main, final_input_ids)
+
+        # ---------- Check stopping ----------
+        best_tokens = candidate_outputs[best_idx][:, -pseudo_sentence_length:]
+        if any(t.item() in eos_token_id for t in best_tokens[0]) or stopping_criteria(final_input_ids, None):
+            finished = True
+
         if streamer is not None:
-            streamer.put(best_new_tokens.cpu())
-
-        # stop if chosen candidate contained EOS or stopping criteria met
-        # check EOS presence in newly appended tokens
-        eos_in_best = any(int(t.item()) in eos_set for t in best_new_tokens.view(-1))
-        if eos_in_best:
-            finished = True
-
-        # call stopping_criteria with scores placeholder (empty tuple) to match expected signature
-        if stopping_criteria(final_input_ids, ()):
-            finished = True
+            streamer.put(best_tokens.cpu())
 
     if streamer is not None:
         streamer.end()
 
-    # return with correct output class depending on model type
+    # ---------- Return ----------
     if return_dict_in_generate:
-        if self.config.is_encoder_decoder:
-            # we don't currently collect encoder_attentions/hidden_states or decoder_hidden_states here;
-            # return None for those fields (caller can adapt to collect if needed).
-            return SampleEncoderDecoderOutput(
-                sequences=final_input_ids,
-                scores=None,
-                encoder_attentions=None,
-                encoder_hidden_states=None,
-                decoder_attentions=None,
-                cross_attentions=None,
-                decoder_hidden_states=None,
-            )
-        else:
-            return SampleDecoderOnlyOutput(
-                sequences=final_input_ids,
-                scores=None,
-                attentions=None,
-                hidden_states=None,
-            )
+        return SampleDecoderOnlyOutput(sequences=final_input_ids, attentions=None, hidden_states=None)
     else:
         return final_input_ids
 
 
 
+def evolve_beam_search():
+    transformers.generation.utils.GenerationMixin.sample = sample_with_ensemble
+    # sample is now a protected function in the latest Transformers library
+    transformers.generation.utils.GenerationMixin._sample = sample_with_ensemble
 
 
