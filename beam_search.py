@@ -115,8 +115,14 @@ def sentence_evaluator(
 
     shifted_attn = {k + token_offset: v for k,v in all_attn.items()}
     preds = classifier.predict(shifted_attn)
-    n_fp = np.sum([preds[k] > threshold for k in preds.keys()])
-    return -n_fp
+    # n_fp = np.sum([preds[k] > threshold for k in preds.keys()])
+    n_fp = [0]
+    for k in preds.keys():
+        if k < 3 or k > 160:
+            continue
+        n_fp.append(preds[k] > threshold)
+        
+    return -np.sum(n_fp)
 
 
 # -------------------------- Helpers --------------------------
@@ -147,13 +153,14 @@ def _detach_and_clone_model_kwargs(model_kwargs, device=None):
         )
     return mk
 
-def _assert_cache_alignment(model_kwargs, input_ids, image_tokens_count=576, tolerance=4):
+def _assert_cache_alignment(model_kwargs, input_ids):
+    """Check that cached sequence length matches current token count."""
     pk = model_kwargs.get("past_key_values", None)
     if pk is None:
         return
     cached_len = pk[0][0].shape[-2]
-    if abs(cached_len - (input_ids.shape[1] + image_tokens_count)) > tolerance:
-        print(f"[WARN] Cache length {cached_len} != expected {input_ids.shape[1] + image_tokens_count}")
+    if cached_len != input_ids.shape[1]:
+        print(f"[WARN] Cache length {cached_len} != input tokens {input_ids.shape[1]}")
 
 # --------------------------------------------------------------
 
@@ -161,8 +168,8 @@ def _assert_cache_alignment(model_kwargs, input_ids, image_tokens_count=576, tol
 def sample_with_ensemble(
     self,
     input_ids: torch.LongTensor,
-    ensemble_size: int = 5,
-    pseudo_sentence_length: int = 20,
+    ensemble_size: int = 15,
+    pseudo_sentence_length: int = 40,
     search_start: int = 2,
     logits_processor: Optional[LogitsProcessorList] = None,
     stopping_criteria: Optional[StoppingCriteriaList] = None,
@@ -181,16 +188,7 @@ def sample_with_ensemble(
     """
     Ensemble-guided sampling with correct past_key_values handling.
     """
-
-    # ---------- Classifier ----------
-    classifier = FPAttentionClassifier(
-        model_path="/home/rz15dire/Ensemble/experiments/eval/classifier_outputs/llava_temp1/pytorch_mlp_exp__ent1_gin0/model/pytorch_mlp_with_l2.pt",
-        scaler_path="/home/rz15dire/Ensemble/experiments/eval/classifier_outputs/llava_temp1/pytorch_mlp_exp__ent1_gin0/model/scaler.pt",
-        n_layers=32,
-        n_heads=32,
-        use_entropy=True,
-        use_gini=False,
-    )
+    classifier = getattr(self, "classifier", None)
 
     # ---------- Setup ----------
     logits_processor = logits_processor or LogitsProcessorList()
@@ -280,6 +278,7 @@ def sample_with_ensemble(
             candidate_scores.append(
                 sentence_evaluator(candidate_attentions[i], classifier, total_generated)
             )
+        total_generated += pseudo_sentence_length
 
         best_idx = int(torch.tensor(candidate_scores).argmax())
 
