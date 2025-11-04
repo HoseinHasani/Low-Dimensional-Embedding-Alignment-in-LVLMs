@@ -3,7 +3,8 @@ import json
 from tqdm import tqdm
 from openai import OpenAI
 
-client = OpenAI()
+client = OpenAI(
+    )
 
 input_dir = "postprocess_results"  
 output_dir = "postprocess_refined"
@@ -16,40 +17,36 @@ SYSTEM_PROMPT = """You are a text-editing assistant that improves image captions
 EDITING_PROMPT = """
 **Problem Description:**
 
-We are working on a system that generates captions for images. However, sometimes the system may hallucinate or include objects that are not actually present in the image. These hallucinated objects are detected and marked as false positives (FP) using a special token `$` before the object in the caption. For example, a hallucinated object like "refrigerator" would appear as `$refrigerator`.
+We are working on a system that generates captions for images. Sometimes, the system may hallucinate or include objects that are not actually present in the image. These hallucinated objects are detected and marked as false positives (FP) using a special token `$` before the object in the caption. For example, a hallucinated object like "$refrigerator" would appear as `$refrigerator`.
 
-The task is to read the caption with the marked FP tokens and remove the hallucinated objects while maintaining the fluency of the text. The goal is to preserve the original context of the image and avoid introducing new objects or altering the intended meaning.
+**Your Task:**
 
----
+You are given a caption that includes hallucinated objects marked with `$` (e.g., `$refrigerator`). Your task is to remove **only** the hallucinated objects and keep the rest of the caption intact, maintaining fluency, context, and clarity.
 
-**Main Instructions:**
+**Strict Instructions:**
 
-1. **FP Marked Tokens**: Any hallucinated object in the caption is marked with `$` before it (e.g., `$refrigerator`).
+1. **Remove Only Hallucinated Objects:**
+    - The objects marked with `$` are hallucinated, and you need to **remove only those hallucinated objects** from the caption. For example:
+      - "The image shows a spacious studio apartment kitchen with wooden cabinets and $refrigerator." → "The image shows a spacious studio apartment kitchen with wooden cabinets."
+      - Do **not** remove any objects in the sentence that are not marked with `$`. These should be kept as they are, since they describe actual objects in the image.
+    
+2. **Minimal Changes:** 
+    - If removing a hallucinated object causes awkward phrasing, make minimal edits to improve the fluency of the sentence. For example:
+    - **Do not delete** entire sentence structures unless absolutely necessary to maintain clarity.
 
-2. **Removing Hallucinated Objects**:
-   * If the object can be removed without damaging the text or altering its meaning, just remove it.
+3. **Faithfulness to the Original Caption:** 
+    - Ensure that the edited caption remains **faithful** to the original context. Do not introduce new details, objects, or replace hallucinated objects with new ones (e.g., don't replace `$refrigerator` with another new object `microwave`).
+    - The resulting text should **not lose any original meaning** or introduce new aspects of the scene not present in the image.
 
-3. **Minimize Changes**:
-   * Make minimal edits and preserve other content.
+4. **Clarity and Brevity:**
+    - The edited caption should be clear and concise without being overly terse. Do not over-edit the original content. Make sure that the edited text does not contain objects that marked with $ in the input text.
 
-4. **No New Objects**:
-   * Do not introduce new details.
+5. **Output Format:**
+    - Provide only the final, edited caption inside **double quotes** (`""`), without any additional text or explanations.
 
-5. **Faithfulness to the Original Caption**:
-   * Keep edits faithful to the original meaning.
-
-6. **Clarity and Brevity**:
-   * Ensure the caption reads naturally after editing.
-
-7. **No Over-Editing**:
-   * Only edit what’s necessary.
-
-8. **Output Format**:
-   * Provide only the edited caption inside double quotes (""). Do not add explanations or extra text.
-
----
 
 The input caption is:
+
 """
 
 for file in tqdm(files, desc="Processing captions with GPT"):
@@ -64,13 +61,13 @@ for file in tqdm(files, desc="Processing captions with GPT"):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",  
+            model="gpt-5",  
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.2,
-            max_tokens=200,
+            max_tokens=250,
         )
 
         edited_caption = response.choices[0].message.content.strip().strip('"')
