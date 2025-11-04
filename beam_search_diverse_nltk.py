@@ -1,3 +1,4 @@
+import nltk
 import copy
 import inspect
 import warnings
@@ -34,6 +35,72 @@ import os
 import matplotlib.pyplot as plt 
 from llava.constants import IMAGE_TOKEN_INDEX
 import numpy as np
+import re
+
+def find_llava_indices(gen_text: str, chair_tokens: List[List[str]], tokenizer) -> List[List[int]]:
+    """
+    Map each chair token entry to the sequential LLaVA tokenizer subtoken indices
+    corresponding to the next occurrence of that word in gen_text.
+    """
+    results = []
+
+    # Tokenize once (no special tokens)
+    token_ids = tokenizer.encode(gen_text, add_special_tokens=False)
+    subwords = [tokenizer.decode([tid]) for tid in token_ids]
+
+    # --- Build offsets by walking the text sequentially ---
+    offsets = []
+    pointer = 0
+    text_lower = gen_text.lower()
+    for sw in subwords:
+        sw_clean = sw.strip()
+        if not sw_clean:
+            offsets.append((pointer, pointer))
+            continue
+
+        # Find sw starting from current pointer
+        idx = text_lower.find(sw_clean.lower(), pointer)
+        if idx == -1:
+            start, end = pointer, pointer + len(sw_clean)
+        else:
+            start, end = idx, idx + len(sw_clean)
+        offsets.append((start, end))
+        pointer = end
+
+    # --- Collect matches for each word ---
+    matches_by_word = {}
+    for pair in chair_tokens:
+        target = pair[0]
+        key = target.lower()
+        if key not in matches_by_word:
+            pattern = rf"\b{re.escape(target)}(es|s)?\b"
+            matches_by_word[key] = [m.span() for m in re.finditer(pattern, gen_text, flags=re.IGNORECASE)]
+
+    consumed_idx = {k: 0 for k in matches_by_word}
+
+    # --- Sequentially assign matches ---
+    for pair in chair_tokens:
+        target = pair[0]
+        key = target.lower()
+        spans = matches_by_word.get(key, [])
+        idx = consumed_idx[key]
+
+        if idx >= len(spans):
+            results.append([])
+            continue
+
+        start_char, end_char = spans[idx]
+
+        # Collect all token indices overlapping this match
+        indices = [
+            i for i, (tok_start, tok_end) in enumerate(offsets)
+            if tok_start < end_char and tok_end > start_char
+        ]
+
+        results.append(indices)
+        consumed_idx[key] += 1
+
+    return results
 
 
 def extract_top_attentions_by_steps(all_attentions, token_indices, image_token_index, image_tokens_count,
@@ -69,7 +136,7 @@ def extract_top_attentions_by_steps(all_attentions, token_indices, image_token_i
     n_layers_total = len(all_attentions[0])
     layer_end = min(layer_end, n_layers_total - 1)
     
-    token_indices = np.ravel(token_indices)
+    token_indices = [inds[0] for inds in token_indices if len(inds) > 0]
 
     for idx in token_indices:
 
@@ -90,19 +157,36 @@ def extract_top_attentions_by_steps(all_attentions, token_indices, image_token_i
 
 
 
+
+
 def sentence_evaluator(
     candidate_attentions,
     classifier,
     token_offset,
+    tokenizer,
+    input_ids=None,
+    output_ids=None,
     image_token_index=35,
     image_tokens_count=576,
     topk=20,
     layer_start=0,
     layer_end=32,
-    # threshold=0.5
+    use_nltk=False,  
 ):
+    if use_nltk:
+        # generated_text = tokenizer.batch_decode(
+        #     output_ids[:, input_ids.shape[1]:], skip_special_tokens=True
+        # )[0]
+        words = nltk.word_tokenize(generated_text.lower())
+        tagged_sent = nltk.pos_tag(words)
+        nouns = [word for word, tag in tagged_sent if "NN" in tag]
 
-    all_indices = [[i] for i in range(len(candidate_attentions))]
+        noun_indices = find_llava_indices(generated_text, nouns, tokenizer)
+        all_indices = [[i] for i in noun_indices]  
+
+    else:
+        all_indices = [[i] for i in range(len(candidate_attentions))]
+
     all_attn = extract_top_attentions_by_steps(
         candidate_attentions,
         all_indices,
@@ -113,23 +197,21 @@ def sentence_evaluator(
         layer_end=layer_end,
     )
 
-    shifted_attn = {k + token_offset: v for k,v in all_attn.items()}
+
+    shifted_attn = {k + token_offset: v for k, v in all_attn.items()}
     preds = classifier.predict(shifted_attn)
-    # n_fp = np.sum([preds[k] > threshold for k in preds.keys()])
-    n_fp = [0]
-    for k in preds.keys():
-        if k < 3 or k > 160:
-            continue
-        
-        if preds[k] > 0.5:
-            n_fp.append(1)
-            n_fp.append(preds[k])
-            
-        if preds[k] > 0.75:
-            n_fp.append(1)
-            n_fp.append(preds[k])         
-        
+
+    
+    for k, p in preds.items():
+        if 3 <= k <= 160:
+            if p > 0.5:
+                n_fp.extend([1, p])
+            if p > 0.75:
+                n_fp.extend([1, p])
+
     return -np.sum(n_fp)
+
+
 
 
 # -------------------------- Helpers --------------------------
@@ -179,7 +261,9 @@ def sample_with_ensemble(
     pseudo_sentence_length: int = 20,
     search_start: int = 2,
     diversity_win_length: int = 6,              
-    diversity_random_thresh: float = 0.3,       
+    diversity_random_thresh: float = 0.3,      
+    apply_diversity: bool = False,  # for diversity
+    use_nltk: bool = True,        # for POS tagging
     logits_processor: Optional[LogitsProcessorList] = None,
     stopping_criteria: Optional[StoppingCriteriaList] = None,
     logits_warper: Optional[LogitsProcessorList] = None,
@@ -195,7 +279,7 @@ def sample_with_ensemble(
     **model_kwargs,
 ):
     """
-    Ensemble-guided sampling with diversity encouragement.
+    Ensemble-guided sampling with diversity encouragement and optional NLTK POS tagging.
     """
     classifier = getattr(self, "classifier", None)
 
@@ -279,7 +363,7 @@ def sample_with_ensemble(
                     eos_hit = True
 
                 # ---------- DIVERSITY CHECK ----------
-                if token_count == diversity_win_length:
+                if apply_diversity and token_count == diversity_win_length:
                     prefix = tuple(input_tmp[0, -diversity_win_length:].tolist())
                     duplicate_found = any(prefix == prev for prev in prefix_list)
                     if duplicate_found and torch.rand(1).item() >= diversity_random_thresh:
@@ -306,7 +390,7 @@ def sample_with_ensemble(
         # ---------- Evaluate candidates ----------
         for i in range(len(candidate_outputs)):
             candidate_scores.append(
-                sentence_evaluator(candidate_attentions[i], classifier, total_generated)
+                sentence_evaluator(candidate_attentions[i], classifier, total_generated, use_nltk=use_nltk)
             )
 
         total_generated += pseudo_sentence_length
