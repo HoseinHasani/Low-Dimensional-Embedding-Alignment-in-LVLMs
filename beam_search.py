@@ -175,11 +175,9 @@ def _assert_cache_alignment(model_kwargs, input_ids):
 def sample_with_ensemble(
     self,
     input_ids: torch.LongTensor,
-    ensemble_size: int = 15,
-    pseudo_sentence_length: int = 40,
+    ensemble_size: int = 5,
+    pseudo_sentence_length: int = 20,
     search_start: int = 2,
-    diversity_win_length: int = 6,              
-    diversity_random_thresh: float = 0.3,       
     logits_processor: Optional[LogitsProcessorList] = None,
     stopping_criteria: Optional[StoppingCriteriaList] = None,
     logits_warper: Optional[LogitsProcessorList] = None,
@@ -195,7 +193,7 @@ def sample_with_ensemble(
     **model_kwargs,
 ):
     """
-    Ensemble-guided sampling with diversity encouragement.
+    Ensemble-guided sampling with correct past_key_values handling.
     """
     classifier = getattr(self, "classifier", None)
 
@@ -224,7 +222,7 @@ def sample_with_ensemble(
     finished = False
     total_generated = 0
 
-    # ---------- Phase 1: Warm-up ----------
+    # ---------- Phase 1: Warm-up normal sampling ----------
     while total_generated < search_start and not finished:
         model_inputs = self.prepare_inputs_for_generation(final_input_ids, **model_kwargs_main)
         outputs = self(**model_inputs, return_dict=True)
@@ -248,13 +246,13 @@ def sample_with_ensemble(
     # ---------- Phase 2: Ensemble-guided sampling ----------
     while not finished:
         candidate_outputs, candidate_attentions, candidate_scores, candidate_model_kwargs = [], [], [], []
-        prefix_list = []  # store first few tokens of accepted ensemble candidates
 
-        for candidate_idx in range(ensemble_size):
+        for _ in range(ensemble_size):
+            # Make a fully independent copy of the current model state
             model_kwargs_tmp = _detach_and_clone_model_kwargs(model_kwargs_main, device=next(self.parameters()).device)
             input_tmp = final_input_ids.clone()
+
             decoder_attn_tmp, token_count, eos_hit = [], 0, False
-            diverse_enough = True  # assume candidate is diverse
 
             while token_count < pseudo_sentence_length and not eos_hit:
                 model_inputs = self.prepare_inputs_for_generation(input_tmp, **model_kwargs_tmp)
@@ -274,51 +272,30 @@ def sample_with_ensemble(
                     outputs, model_kwargs_tmp, is_encoder_decoder=self.config.is_encoder_decoder
                 )
 
-                token_count += 1
                 if next_tokens[0].item() in eos_token_id:
                     eos_hit = True
+                token_count += 1
 
-                # ---------- DIVERSITY CHECK ----------
-                if token_count == diversity_win_length:
-                    prefix = tuple(input_tmp[0, -diversity_win_length:].tolist())
-                    duplicate_found = any(prefix == prev for prev in prefix_list)
-                    if duplicate_found and torch.rand(1).item() >= diversity_random_thresh:
-                        diverse_enough = False
-                    break  # stop early if we already decided
-
-            # Skip if not diverse enough
-            if not diverse_enough:
-                continue
-
-            # Otherwise record prefix for future comparisons
-            prefix_list.append(tuple(input_tmp[0, -diversity_win_length:].tolist()))
-            candidate_outputs.append(input_tmp)
-            candidate_attentions.append(decoder_attn_tmp)
-            candidate_model_kwargs.append(model_kwargs_tmp)
-
-        # If nothing passed diversity filter, fallback: reuse last valid candidate
-        if len(candidate_outputs) == 0:
-            print("[WARN] All ensemble samples filtered out; relaxing diversity constraint.")
             candidate_outputs.append(input_tmp)
             candidate_attentions.append(decoder_attn_tmp)
             candidate_model_kwargs.append(model_kwargs_tmp)
 
         # ---------- Evaluate candidates ----------
-        for i in range(len(candidate_outputs)):
+        for i in range(ensemble_size):
             candidate_scores.append(
                 sentence_evaluator(candidate_attentions[i], classifier, total_generated)
             )
-
         total_generated += pseudo_sentence_length
+
         best_idx = int(torch.tensor(candidate_scores).argmax())
 
+        # ---------- Adopt best candidate state ----------
         final_input_ids = candidate_outputs[best_idx]
-        model_kwargs_main = _detach_and_clone_model_kwargs(
-            candidate_model_kwargs[best_idx], device=next(self.parameters()).device
-        )
+        model_kwargs_main = _detach_and_clone_model_kwargs(candidate_model_kwargs[best_idx], device=next(self.parameters()).device)
 
         _assert_cache_alignment(model_kwargs_main, final_input_ids)
 
+        # ---------- Check stopping ----------
         best_tokens = candidate_outputs[best_idx][:, -pseudo_sentence_length:]
         if any(t.item() in eos_token_id for t in best_tokens[0]) or stopping_criteria(final_input_ids, None):
             finished = True
@@ -329,10 +306,12 @@ def sample_with_ensemble(
     if streamer is not None:
         streamer.end()
 
+    # ---------- Return ----------
     if return_dict_in_generate:
         return SampleDecoderOnlyOutput(sequences=final_input_ids, attentions=None, hidden_states=None)
     else:
         return final_input_ids
+
 
 
 def evolve_beam_search():
