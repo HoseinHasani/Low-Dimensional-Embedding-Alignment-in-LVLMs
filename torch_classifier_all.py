@@ -27,6 +27,8 @@ os.makedirs(base_save_dir, exist_ok=True)
 
 dataset_path = "cls_data__e_True_g_False" #None #"cls_data"
 
+use_text_attentions = True
+
 n_files = 3900
 n_layers, n_heads = 32, 32
 min_position = 5
@@ -81,9 +83,9 @@ def compute_gini(values):
     gini = np.sum(coef * sorted_p, axis=-1) / (n * np.sum(sorted_p, axis=-1) + eps)
     return np.abs(gini)
 
-def extract_attention_values(data_dict, cls_):
+def extract_attention_values(data_dict, cls_, source="image"):
     results = []
-    entries = data_dict.get(cls_, {}).get("image", [])
+    entries = data_dict.get(cls_, {}).get(source, [])
     for e in entries:
         if not e.get("subtoken_results"):
             continue
@@ -95,6 +97,7 @@ def extract_attention_values(data_dict, cls_):
             results.append((idx, topk_vals[..., :n_top_k]))
     return results
 
+
 def aggregate_by_position(attention_data, n_layers, n_heads):
     layer_head_data = {l: {h: {} for h in range(n_heads)} for l in range(n_layers)}
     for idx, mean_vals in attention_data:
@@ -103,7 +106,9 @@ def aggregate_by_position(attention_data, n_layers, n_heads):
                 layer_head_data[l][h].setdefault(int(idx), []).append(float(mean_vals[l, h]))
     return layer_head_data
 
-def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_position):
+def extract_all_features(
+    files, n_files, n_layers, n_heads, min_position, max_position
+):
     X, y, pos_list, cls_list = [], [], [], []
     for f in tqdm(files[:n_files], desc="Extracting features"):
         try:
@@ -113,16 +118,29 @@ def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_po
             continue
 
         for cls_, label in [("fp", 1), ("tp", 0), ("other", 0)]:
-            attention_samples = extract_attention_values(data_dict, cls_)
-            for idx, topk_arr in attention_samples:
+            img_samples = extract_attention_values(data_dict, cls_, "image")
+
+            if use_text_attentions:
+                txt_samples = extract_attention_values(data_dict, cls_, "text")
+            else:
+                txt_samples = []
+
+            all_samples = []
+            if img_samples:
+                all_samples.extend([("image", *s) for s in img_samples])
+            if use_text_attentions and txt_samples:
+                all_samples.extend([("text", *s) for s in txt_samples])
+
+            for src, idx, topk_arr in all_samples:
                 token_pos = int(idx)
                 if token_pos < min_position or token_pos > max_position:
                     continue
+
                 features = []
 
                 for l in range(n_layers):
                     for h in range(n_heads):
-                        vals = topk_arr[l, h, :]    
+                        vals = topk_arr[l, h, :]
                         mean_attention = np.mean(vals)
                         features.append(mean_attention)
 
@@ -130,14 +148,22 @@ def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_po
                             features.append(compute_entropy(vals))
                         if use_gini:
                             features.append(compute_gini(vals))
+
+                if use_text_attentions:
+                    features.append(1.0 if src == "text" else 0.0)
+
                 features.append(token_pos / max_position)
+
                 X.append(features)
                 y.append(label)
                 pos_list.append(token_pos)
                 cls_list.append(cls_)
+
     if len(X) == 0:
         return None, None, None, None
+
     return np.array(X), np.array(y), np.array(pos_list), np.array(cls_list)
+
 
 
 
