@@ -294,9 +294,47 @@ def plot_avg_attention_over_layers(tp_posmap, fp_posmap, oth_posmap,
     plt.legend(fontsize=12)
     plt.xlim(4,156)
     plt.tight_layout()
-    plt.savefig(savepath, dpi=200)
+    plt.savefig(savepath, dpi=130)
     plt.show()
 
+
+def plot_overall_attention_strength(tp_posmap, fp_posmap, oth_posmap,
+                                    st_layer=0, end_layer=15, n_heads=32,
+                                    savepath="overall_attention_strength.png"):
+    """
+    Plot a simple bar chart of overall averaged attention
+    (averaged over tokens, heads, and layers) for TP, FP, and Others.
+    """
+    def compute_overall_mean(posmap):
+        vals_all = []
+        for l in range(st_layer, end_layer):
+            for h in range(n_heads):
+                for idx, vals in posmap[l][h].items():
+                    vals_all.extend(vals)
+        if len(vals_all) == 0:
+            return 0.0
+        return np.mean(vals_all)
+
+    tp_mean = compute_overall_mean(tp_posmap)
+    fp_mean = compute_overall_mean(fp_posmap)
+    oth_mean = compute_overall_mean(oth_posmap)
+
+    means = [tp_mean, fp_mean, oth_mean]
+    labels = ["True Positives", "False Positives", "Others"]
+    colors = ["tab:green", "tab:red", "tab:gray"]
+
+    plt.figure(figsize=(6, 6))
+    plt.bar(labels, means, color=colors, alpha=0.8)
+    plt.ylabel("Average Attention Strength", fontsize=14)
+    plt.title(f"Overall Attention (Layers {st_layer}–{end_layer})", fontsize=15)
+
+    # Annotate values
+    for i, val in enumerate(means):
+        plt.text(i, val + 0.001, f"{val:.4f}", ha="center", va="bottom", fontsize=12)
+
+    plt.tight_layout()
+    plt.savefig(savepath, dpi=130)
+    plt.show()
 
 
 
@@ -315,4 +353,9 @@ oth_posmap = aggregate_by_position(oth_data, n_layers, n_heads)
 
 plot_avg_attention_over_layers(tp_posmap, fp_posmap, oth_posmap,
                                st_layer=5, end_layer=19,
-                               savepath="avg_attention_L5to19.pdf")
+                               savepath="avg_attention_L5to19.png")
+
+plot_overall_attention_strength(tp_posmap, fp_posmap, oth_posmap,
+                                st_layer=5, end_layer=19,
+                                n_heads=32,
+                                savepath="overall_attention_strength_L5to19.png")
