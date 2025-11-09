@@ -10,7 +10,7 @@ from collections import Counter
 
 data_dir = "data/all layers all attention tp fp"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
-n_files = 3960
+n_files = 4000
 n_layers, n_heads = 32, 32
 avg_win_size = 2
 stride_size = 1
@@ -233,6 +233,71 @@ def plot_token_class_composition(tp_data, fp_data, oth_data, n_layers,
     plt.tight_layout()
     plt.savefig(savepath, dpi=140)
     plt.show()
+    
+    
+def plot_avg_attention_over_layers(tp_posmap, fp_posmap, oth_posmap,
+                                   st_layer=0, end_layer=32, n_heads=32,
+                                   savepath="avg_attention_over_tokens.png",
+                                   avg_win_size=2, stride_size=1):
+    """
+    Plot averaged attention over heads and summed over layers between st_layer and end_layer.
+    """
+    def aggregate_class(posmap):
+        combined = {}
+        for l in range(st_layer, end_layer):
+            for h in range(n_heads):
+                for idx, vals in posmap[l][h].items():
+                    combined.setdefault(idx, []).extend(vals)
+        return combined
+
+    tp_combined = aggregate_class(tp_posmap)
+    fp_combined = aggregate_class(fp_posmap)
+    oth_combined = aggregate_class(oth_posmap)
+
+    def smooth_with_ci(pos_map, win=3, stride=1):
+        from scipy.stats import sem
+        positions = sorted(pos_map.keys())
+        if not positions:
+            return np.array([]), np.array([]), np.array([])
+        x_arr = np.array(positions)
+        xs, ys, cis = [], [], []
+        for start in range(0, len(x_arr) - win + 1, stride):
+            window_x = x_arr[start:start + win]
+            vals = []
+            for p in window_x:
+                vals.extend(pos_map.get(p, []))
+            if not vals:
+                continue
+            xs.append(np.mean(window_x))
+            ys.append(np.mean(vals))
+            cis.append(1.96 * sem(vals) if len(vals) > 1 else 0.0)
+        return np.array(xs), np.array(ys), np.array(cis)
+
+    tp_x, tp_y, tp_ci = smooth_with_ci(tp_combined, win=avg_win_size, stride=stride_size)
+    fp_x, fp_y, fp_ci = smooth_with_ci(fp_combined, win=avg_win_size, stride=stride_size)
+    oth_x, oth_y, oth_ci = smooth_with_ci(oth_combined, win=avg_win_size, stride=stride_size)
+
+    plt.figure(figsize=(10, 6))
+    if tp_x.size > 0:
+        plt.plot(tp_x, tp_y, color="tab:green", label="TP", linewidth=2)
+        plt.fill_between(tp_x, tp_y - tp_ci, tp_y + tp_ci, color="tab:green", alpha=0.2)
+    if fp_x.size > 0:
+        plt.plot(fp_x, fp_y, color="tab:red", label="FP", linewidth=2)
+        plt.fill_between(fp_x, fp_y - fp_ci, fp_y + fp_ci, color="tab:red", alpha=0.2)
+    # if oth_x.size > 0:
+    #     plt.plot(oth_x, oth_y, color="tab:gray", label="Others", linewidth=2)
+    #     plt.fill_between(oth_x, oth_y - oth_ci, oth_y + oth_ci, color="tab:gray", alpha=0.2)
+
+    plt.xlabel("Token Index (Generated Text)", fontsize=14)
+    plt.ylabel("Aggregated Attention (avg over heads, sum over layers)", fontsize=14)
+    plt.title(f"Aggregated Attention ({st_layer}–{end_layer})", fontsize=16)
+    plt.legend(fontsize=12)
+    plt.xlim(4,156)
+    plt.tight_layout()
+    plt.savefig(savepath, dpi=200)
+    plt.show()
+
+
 
 
 
@@ -242,8 +307,12 @@ fp_posmap = aggregate_by_position(fp_data, n_layers, n_heads)
 oth_posmap = aggregate_by_position(oth_data, n_layers, n_heads)
 
 
-plot_attention_grid(tp_posmap, fp_posmap, oth_posmap, n_layers, n_heads, savepath="attention_grid.pdf")
+# plot_attention_grid(tp_posmap, fp_posmap, oth_posmap, n_layers, n_heads, savepath="attention_grid.pdf")
 
-plot_position_histograms(tp_posmap, fp_posmap, oth_posmap)
+# plot_position_histograms(tp_posmap, fp_posmap, oth_posmap)
 
-plot_token_class_composition(tp_posmap, fp_posmap, oth_posmap, n_layers, n_heads)
+# plot_token_class_composition(tp_posmap, fp_posmap, oth_posmap, n_layers, n_heads)
+
+plot_avg_attention_over_layers(tp_posmap, fp_posmap, oth_posmap,
+                               st_layer=5, end_layer=19,
+                               savepath="avg_attention_L5to19.pdf")
