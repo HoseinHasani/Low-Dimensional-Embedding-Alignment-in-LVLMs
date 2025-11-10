@@ -27,7 +27,10 @@ base_save_dir = "tokenbalanced_results_all_layers"
 os.makedirs(base_save_dir, exist_ok=True)
 
 dataset_path = "cls_data__e_True_g_False"
-use_text_attentions = True
+use_text_attentions = False
+
+fp2tp_ratio = 0.8
+other_dropout = 0.2
 
 n_files = 3900
 n_layers, n_heads = 32, 32
@@ -110,6 +113,10 @@ def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_po
             continue
 
         for cls_, label in [("fp", 1), ("tp", 0), ("other", 0)]:
+            
+            # if cls_ is "other" and np.random.rand() < 0.5:
+            #     continue
+            
             img_samples = extract_attention_values(data_dict, cls_, "image")
 
             if use_text_attentions:
@@ -182,7 +189,7 @@ def compute_adaptive_fp_replication_factors(y_all, pos_all, win=5):
         if n_1 == 0:
             replication_factors[j] = 1
         else:
-            replication_factors[j] = max(int(np.round(n_0 / n_1)), 1)
+            replication_factors[j] = max(int(fp2tp_ratio * np.round(n_0 / n_1)), 1)
 
     print(f"Computed adaptive replication factors for positions {min_pos}–{max_pos}")
     return replication_factors
@@ -211,6 +218,28 @@ def balance_fp_samples_adaptive(X, y, pos, cls, fp_factors):
 
     return X_bal, y_bal, pos_bal, cls_bal
 
+def drop_other_samples(X, y, pos, cls, dropout_ratio=0.5, seed=42):
+    """
+    Randomly remove a fraction of 'other' class samples from the dataset.
+    """
+    np.random.seed(seed)
+    mask_other = (cls == "other")
+    other_indices = np.where(mask_other)[0]
+
+    if dropout_ratio <= 0 or len(other_indices) == 0:
+        return X, y, pos, cls
+    if dropout_ratio >= 1.0:
+        keep_mask = ~mask_other
+    else:
+        n_drop = int(len(other_indices) * dropout_ratio)
+        drop_indices = np.random.choice(other_indices, size=n_drop, replace=False)
+        keep_mask = np.ones(len(cls), dtype=bool)
+        keep_mask[drop_indices] = False
+
+    print(f"Dropped {np.sum(~keep_mask)} / {len(cls)} ('other' samples removed: {100*dropout_ratio:.1f}%)")
+    return X[keep_mask], y[keep_mask], pos[keep_mask], cls[keep_mask]
+
+
 
 # -----------------------------
 # Load or Extract Dataset
@@ -236,7 +265,13 @@ else:
         np.save(os.path.join(dataset_path, "pos.npy"), pos_all)
         np.save(os.path.join(dataset_path, "cls.npy"), cls_all)
         print(f"Dataset saved in '{dataset_path}/'")
+        
 
+
+
+X_all, y_all, pos_all, cls_all = drop_other_samples(
+    X_all, y_all, pos_all, cls_all, dropout_ratio=other_dropout
+)
 
 # -----------------------------
 # Train/Test Split
@@ -273,7 +308,7 @@ print(f"Test size:  {len(y_test)} | FP={np.sum(y_test==1)}, Non-FP={np.sum(y_tes
 # Optional: visualize replication factors
 plt.figure(figsize=(10, 4))
 plt.plot(list(train_fp_factors.keys()), list(train_fp_factors.values()), 'o-', label="Train factors")
-plt.plot(list(test_fp_factors.keys()), list(test_fp_factors.values()), 'x--', label="Test factors")
+# plt.plot(list(test_fp_factors.keys()), list(test_fp_factors.values()), 'x--', label="Test factors")
 plt.xlabel("Token Position")
 plt.ylabel("Adaptive FP Replication Factor")
 plt.title("Adaptive FP Replication per Token Position (win=5)")
