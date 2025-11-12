@@ -6,16 +6,14 @@ from glob import glob
 from tqdm import tqdm
 import seaborn as sns
 
-# ---------------- CONFIG ----------------
 data_dir = "data/all layers all attention tp fp"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
-n_layers, n_heads = 32, 32           
-n_img_side = 24                      
+n_layers, n_heads = 32, 32          
+n_img_side = 24                     
 top_k = 5                            
 n_files = len(files)
 sns.set(style="whitegrid")
 
-# ---------------- STEP 1: Extract top-k attended image positions ----------------
 def extract_topk_positions(data_dict, cls_, top_k):
     """Return list of (token_idx, topk_pos[l,h,top_k]) for one class (tp/fp/other)."""
     results = []
@@ -33,7 +31,6 @@ def extract_topk_positions(data_dict, cls_, top_k):
             results.append((token_idx, topk_inds))
     return results
 
-# ---------------- STEP 2: Aggregate across images ----------------
 def aggregate_topk_positions(files, n_files, top_k):
     tp, fp, oth = [], [], []
     for f in tqdm(files[:n_files]):
@@ -47,13 +44,8 @@ def aggregate_topk_positions(files, n_files, top_k):
         oth.extend(extract_topk_positions(data_dict, "other", top_k))
     return tp, fp, oth
 
-# ---------------- STEP 3: Compute variance of 2D attention locations ----------------
 def compute_variance_by_layer(attn_data, n_layers, n_heads, n_img_side=24):
-    """
-    attn_data: list of (token_idx, topk_indices[l,h,k])
-    Returns dict: layer -> (token_positions, variance_values)
-    Variance is computed across all n_heads * top_k positions.
-    """
+
     layer_token_positions = {l: [] for l in range(n_layers)}
     layer_variances = {l: [] for l in range(n_layers)}
 
@@ -75,7 +67,6 @@ def compute_variance_by_layer(attn_data, n_layers, n_heads, n_img_side=24):
 
     return layer_token_positions, layer_variances
 
-# ---------------- STEP 4: Plot TP/FP/Other with STD error bands ----------------
 def plot_combined_variance(tp_pos, tp_var, fp_pos, fp_var, oth_pos, oth_var, save_dir, top_k):
     os.makedirs(save_dir, exist_ok=True)
     n_layers = len(tp_var)
