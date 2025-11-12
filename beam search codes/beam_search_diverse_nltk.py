@@ -37,16 +37,12 @@ from llava.constants import IMAGE_TOKEN_INDEX
 import numpy as np
 import re
 
-def find_llava_indices(gen_text: str, chair_tokens: List[List[str]], tokenizer) -> List[List[int]]:
-    """
-    Map each chair token entry to the sequential LLaVA tokenizer subtoken indices
-    corresponding to the next occurrence of that word in gen_text.
-    """
-    results = []
+import re
+from typing import List
 
-    # Tokenize once (no special tokens)
-    token_ids = tokenizer.encode(gen_text, add_special_tokens=False)
-    subwords = [tokenizer.decode([tid]) for tid in token_ids]
+def find_llava_indices(gen_text: str, chair_tokens: List[List[str]], subwords) -> List[List[int]]:
+
+    results = []
 
     # --- Build offsets by walking the text sequentially ---
     offsets = []
@@ -103,31 +99,9 @@ def find_llava_indices(gen_text: str, chair_tokens: List[List[str]], tokenizer) 
     return results
 
 
+
 def extract_top_attentions_by_steps(all_attentions, token_indices, image_token_index, image_tokens_count,
                                     topk=5, layer_start=0, layer_end=14, aggregate=True):
-    """
-    Extract top-k attended image and text tokens for each TP/FP token's subtoken steps.
-
-    Args:
-        all_attentions: tuple of length n_generated, each element is a list of layer attentions
-                        [layer0, layer1, ...], each [batch, heads, seq, seq]
-        token_indices: list of lists of subtoken indices for TP/FP tokens
-        image_token_index: starting index of image tokens in the sequence
-        image_tokens_count: number of image tokens in the sequence
-        topk: number of top tokens to return
-        layer_start, layer_end: layers to average (inclusive)
-        aggregate: if True, averages over subtokens at the end;
-                   if False, keeps each subtoken result separately.
-
-    Returns:
-        dict with keys:
-            {
-                "image": [{"token_indices": [...],
-                           "subtoken_results": [{"idx": int, "topk_indices": [...], "topk_values": [...]}],
-                           "mean_topk_values": [...], "mean_topk_indices": [...]}],
-                "text":  [ ... same structure ... ]
-            }
-    """
 
     results = {}
     batch_size = all_attentions[0][0].shape[0]
@@ -141,7 +115,11 @@ def extract_top_attentions_by_steps(all_attentions, token_indices, image_token_i
     for idx in token_indices:
 
         # (num_layers, B, H, S, S)
-        attn_matrix = all_attentions[idx][layer_start:layer_end + 1]
+        try:
+            attn_matrix = all_attentions[idx][layer_start:layer_end + 1]
+        except:
+            print("Error",idx)
+            
         target_attn_vec = [attn_matrix[i][0].cpu().numpy() for i in range(len(attn_matrix)) ]  
         target_attn_vec = np.array(target_attn_vec).squeeze()
 
@@ -158,13 +136,11 @@ def extract_top_attentions_by_steps(all_attentions, token_indices, image_token_i
 
 
 
-
 def sentence_evaluator(
     candidate_attentions,
     classifier,
     token_offset,
     tokenizer,
-    input_ids=None,
     output_ids=None,
     image_token_index=35,
     image_tokens_count=576,
@@ -173,19 +149,23 @@ def sentence_evaluator(
     layer_end=32,
     use_nltk=False,  
 ):
+    res_len = len(candidate_attentions)
     if use_nltk:
-        # generated_text = tokenizer.batch_decode(
-        #     output_ids[:, input_ids.shape[1]:], skip_special_tokens=True
-        # )[0]
+        generated_text = tokenizer.batch_decode(
+            output_ids[:, -len(candidate_attentions):], skip_special_tokens=True
+        )[0]
+        subwords = [tokenizer.decode([tid]) for tid in output_ids[0][-(res_len+10):]]
+        subwords = subwords[-res_len:]
+
         words = nltk.word_tokenize(generated_text.lower())
         tagged_sent = nltk.pos_tag(words)
-        nouns = [word for word, tag in tagged_sent if "NN" in tag]
+        nouns = [[word,word] for word, tag in tagged_sent if "NN" in tag]
 
-        noun_indices = find_llava_indices(generated_text, nouns, tokenizer)
-        all_indices = [[i] for i in noun_indices]  
+        noun_indices = find_llava_indices(generated_text, nouns, subwords)
+        all_indices = noun_indices
 
     else:
-        all_indices = [[i] for i in range(len(candidate_attentions))]
+        all_indices = [[i] for i in range(res_len)]
 
     all_attn = extract_top_attentions_by_steps(
         candidate_attentions,
@@ -196,25 +176,22 @@ def sentence_evaluator(
         layer_start=layer_start,
         layer_end=layer_end,
     )
+    n_fp = [0]
+    if len(all_attn)>0:
+        shifted_attn = {k + token_offset: v for k, v in all_attn.items()}
+        preds = classifier.predict(shifted_attn)
 
 
-    shifted_attn = {k + token_offset: v for k, v in all_attn.items()}
-    preds = classifier.predict(shifted_attn)
-
-    
-    for k, p in preds.items():
-        if 3 <= k <= 160:
-            if p > 0.5:
-                n_fp.extend([1, p])
-            if p > 0.75:
-                n_fp.extend([1, p])
+        for k, p in preds.items():
+            if 3 <= k <= 160:
+                if p > 0.5:
+                    n_fp.extend([1])
 
     return -np.sum(n_fp)
 
 
 
 
-# -------------------------- Helpers --------------------------
 def _clone_past_key_values(past_key_values):
     """Clone a tuple of past_key_values tensors safely (detach + clone)."""
     if past_key_values is None:
@@ -251,19 +228,18 @@ def _assert_cache_alignment(model_kwargs, input_ids):
     if cached_len != input_ids.shape[1]:
         print(f"[WARN] Cache length {cached_len} != input tokens {input_ids.shape[1]}")
 
-# --------------------------------------------------------------
 
 
 def sample_with_ensemble(
     self,
     input_ids: torch.LongTensor,
-    ensemble_size: int = 5,
+    ensemble_size: int = 10,
     pseudo_sentence_length: int = 20,
     search_start: int = 2,
-    diversity_win_length: int = 6,              
+    diversity_win_length: int = 10, #6             
     diversity_random_thresh: float = 0.3,      
     apply_diversity: bool = False,  # for diversity
-    use_nltk: bool = True,        # for POS tagging
+    use_nltk: bool = False,        # for POS tagging
     logits_processor: Optional[LogitsProcessorList] = None,
     stopping_criteria: Optional[StoppingCriteriaList] = None,
     logits_warper: Optional[LogitsProcessorList] = None,
@@ -282,7 +258,7 @@ def sample_with_ensemble(
     Ensemble-guided sampling with diversity encouragement and optional NLTK POS tagging.
     """
     classifier = getattr(self, "classifier", None)
-
+    tokenizer = getattr(self, "tokenizer", None)
     # ---------- Setup ----------
     logits_processor = logits_processor or LogitsProcessorList()
     logits_warper = logits_warper or LogitsProcessorList()
@@ -329,7 +305,6 @@ def sample_with_ensemble(
         if streamer is not None:
             streamer.put(next_tokens.cpu())
 
-    # ---------- Phase 2: Ensemble-guided sampling ----------
     while not finished:
         candidate_outputs, candidate_attentions, candidate_scores, candidate_model_kwargs = [], [], [], []
         prefix_list = []  # store first few tokens of accepted ensemble candidates
@@ -390,7 +365,7 @@ def sample_with_ensemble(
         # ---------- Evaluate candidates ----------
         for i in range(len(candidate_outputs)):
             candidate_scores.append(
-                sentence_evaluator(candidate_attentions[i], classifier, total_generated, use_nltk=use_nltk)
+                sentence_evaluator(candidate_attentions[i], classifier, total_generated, tokenizer, candidate_outputs[i], use_nltk=use_nltk)
             )
 
         total_generated += pseudo_sentence_length
