@@ -27,15 +27,44 @@ base_save_dir = "tokenbalanced_results_all_layers"
 os.makedirs(base_save_dir, exist_ok=True)
 
 dataset_path = "cls_data__e_True_g_False"
-use_text_attentions = False
+
+
+#######################
+
+zero_class = 'both'
+# zero_class = 'tp'
+# zero_class = 'other'
+
+
+balanced_train = True
+balanced_test = True
 
 fp2tp_ratio = 0.8
-other_dropout = 0.2
+
+test_thresh = 0.5
 
 n_files = 3900
+
+train_size = 0.75
+test_size = 0.25
+
+
+###################
+
+if zero_class == 'tp':
+    other_dropout = 0.9
+    tp_dropout = 0.0
+elif zero_class == 'other':
+    other_dropout = 0.0
+    tp_dropout = 0.9
+else:
+    other_dropout = 0.0
+    tp_dropout = 0.0    
+    
+use_text_attentions = False
 n_layers, n_heads = 32, 32
 min_position = 5
-max_position = 150
+max_position = 155
 position_margin = 2
 n_top_k = 20
 n_subtokens = 1
@@ -44,17 +73,13 @@ eps = 1e-10
 use_entropy = True
 use_gini = False
 
-train_size = 0.75
-test_size = 0.25
-
 n_epochs = 2
 weight_decay = 1e-3
 dropout_rate = 0.5
 
 normalize_features = True
-classifier_type = "pytorch_mlp"
 
-exp_name = f"{classifier_type}_exp__ent{int(use_entropy)}_gin{int(use_gini)}"
+exp_name = f"exp__ent{int(use_entropy)}_gin{int(use_gini)}_bal{int(balanced_train)}_zero_{zero_class}"
 save_dir = os.path.join(base_save_dir, exp_name)
 model_dir = os.path.join(save_dir, "model")
 results_dir = os.path.join(save_dir, "results")
@@ -218,25 +243,24 @@ def balance_fp_samples_adaptive(X, y, pos, cls, fp_factors):
 
     return X_bal, y_bal, pos_bal, cls_bal
 
-def drop_other_samples(X, y, pos, cls, dropout_ratio=0.5, seed=42):
+def drop_samples(X, y, pos, cls, target="other", dropout_ratio=0.5):
     """
-    Randomly remove a fraction of 'other' class samples from the dataset.
+    Randomly remove a fraction of 'target' class samples from the dataset.
     """
-    np.random.seed(seed)
-    mask_other = (cls == "other")
-    other_indices = np.where(mask_other)[0]
+    mask_target = (cls == target)
+    target_indices = np.where(mask_target)[0]
 
-    if dropout_ratio <= 0 or len(other_indices) == 0:
+    if dropout_ratio <= 0 or len(target_indices) == 0:
         return X, y, pos, cls
     if dropout_ratio >= 1.0:
-        keep_mask = ~mask_other
+        keep_mask = ~mask_target
     else:
-        n_drop = int(len(other_indices) * dropout_ratio)
-        drop_indices = np.random.choice(other_indices, size=n_drop, replace=False)
+        n_drop = int(len(target_indices) * dropout_ratio)
+        drop_indices = np.random.choice(target_indices, size=n_drop, replace=False)
         keep_mask = np.ones(len(cls), dtype=bool)
         keep_mask[drop_indices] = False
 
-    print(f"Dropped {np.sum(~keep_mask)} / {len(cls)} ('other' samples removed: {100*dropout_ratio:.1f}%)")
+    print(f"Dropped {np.sum(~keep_mask)} / {len(cls)} ('{target}' samples removed: {100*dropout_ratio:.1f}%)")
     return X[keep_mask], y[keep_mask], pos[keep_mask], cls[keep_mask]
 
 
@@ -268,11 +292,15 @@ else:
         
 
 
+if other_dropout > 0:
+    X_all, y_all, pos_all, cls_all = drop_samples(
+        X_all, y_all, pos_all, cls_all, target="other", dropout_ratio=other_dropout
+    )
 
-X_all, y_all, pos_all, cls_all = drop_other_samples(
-    X_all, y_all, pos_all, cls_all, dropout_ratio=other_dropout
-)
-
+if tp_dropout > 0:
+    X_all, y_all, pos_all, cls_all = drop_samples(
+        X_all, y_all, pos_all, cls_all, target="tp", dropout_ratio=other_dropout
+    )
 # -----------------------------
 # Train/Test Split
 # -----------------------------
@@ -294,12 +322,19 @@ cls_train, cls_test = cls_all[:n_train], cls_all[-n_test:]
 train_fp_factors = compute_adaptive_fp_replication_factors(y_all, pos_train, win=5)
 test_fp_factors = train_fp_factors #compute_adaptive_fp_replication_factors(y_test, pos_test, win=5)
 
-X_train, y_train, pos_train, cls_train = balance_fp_samples_adaptive(
-    X_train, y_train, pos_train, cls_train, train_fp_factors
-)
-X_test, y_test, pos_test, cls_test = balance_fp_samples_adaptive(
-    X_test, y_test, pos_test, cls_test, test_fp_factors
-)
+
+if balanced_train:
+    X_train, y_train, pos_train, cls_train = balance_fp_samples_adaptive(
+        X_train, y_train, pos_train, cls_train, train_fp_factors
+    )
+
+if balanced_test:
+    X_test, y_test, pos_test, cls_test = balance_fp_samples_adaptive(
+        X_test, y_test, pos_test, cls_test, test_fp_factors
+    )
+
+
+
 
 print(f"Train size: {len(y_train)} | FP={np.sum(y_train==1)}, Non-FP={np.sum(y_train==0)}")
 print(f"Test size:  {len(y_test)} | FP={np.sum(y_test==1)}, Non-FP={np.sum(y_test==0)}")
@@ -394,7 +429,7 @@ for epoch in range(n_epochs):
             loss = criterion(logits, yb)
             val_loss += loss.item() * xb.size(0)
             probs = torch.sigmoid(logits)
-            preds = (probs > 0.5).long()
+            preds = (probs > test_thresh).long()
             correct += (preds == yb.long()).sum().item()
             total += yb.size(0)
 
@@ -421,7 +456,7 @@ with torch.no_grad():
         yb = yb.float()
         logits = clf(xb)
         probs = torch.sigmoid(logits).cpu().numpy()
-        preds = (probs > 0.5).astype(int).flatten()
+        preds = (probs > test_thresh).astype(int).flatten()
         y_pred_list.extend(preds)
         y_true_list.extend(yb.numpy())
 
@@ -431,7 +466,7 @@ y_true = np.array(y_true_list)
 precision_global, recall_global, f1_global, _ = precision_recall_fscore_support(y_true, y_pred, average='binary')
 acc_global = accuracy_score(y_true, y_pred)
 
-print("\n=== Global Metrics (PyTorch) ===")
+print(f"\n=== Global Metrics (zero={zero_class}) ===")
 print(f"Precision: {precision_global:.3f}")
 print(f"Recall:    {recall_global:.3f}")
 print(f"F1-score:  {f1_global:.3f}")
