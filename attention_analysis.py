@@ -2,6 +2,8 @@ import os
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
+from sklearn.metrics import precision_score, recall_score, f1_score, accuracy_score
+from sklearn.metrics import roc_curve, auc
 import seaborn as sns
 from glob import glob
 from scipy.stats import sem
@@ -191,3 +193,93 @@ thresholds = compute_optimal_thresholds_image(results)
 with open("optimal_thresholds.json", 'w') as json_file:
     json.dump(thresholds, json_file, indent=4)
 
+
+
+tp_total = sum(len(results["tp"][mod]) for mod in ["image", "text"])
+fp_total = sum(len(results["fp"][mod]) for mod in ["image", "text"])
+
+print(f"Total TP samples: {tp_total}")
+print(f"Total FP samples: {fp_total}")
+
+
+def compute_metrics_across_thresholds(results, start=5, end=165, step=5):
+    # Combine TP and FP positions from image modality
+    tp_positions = [p for p, _ in results["tp"]["image"]]
+    fp_positions = [p for p, _ in results["fp"]["image"]]
+
+    # Prepare data
+    all_positions = np.array(tp_positions + fp_positions)
+    all_labels = np.array([1]*len(tp_positions) + [0]*len(fp_positions))  # 1=TP, 0=FP
+
+    thresholds = list(range(start, end + 1, step))
+    accs, recalls, precs, f1s = [], [], [], []
+
+    for th in thresholds:
+        preds = np.array([1 if pos < th else 0 for pos in all_positions])  # TP if below threshold
+        accs.append(accuracy_score(all_labels, preds))
+        recalls.append(recall_score(all_labels, preds))
+        precs.append(precision_score(all_labels, preds, zero_division=0))
+        f1s.append(f1_score(all_labels, preds))
+
+    return thresholds, accs, recalls, precs, f1s
+
+
+def plot_metrics(thresholds, accs, recalls, precs, f1s):
+    plt.figure(figsize=(9, 6))
+    plt.plot(thresholds, accs, label="Accuracy", linewidth=2)
+    plt.plot(thresholds, recalls, label="Recall", linewidth=2)
+    plt.plot(thresholds, precs, label="Precision", linewidth=2)
+    plt.plot(thresholds, f1s, label="F1 Score", linewidth=2)
+    plt.xlabel("Threshold (Token Position)", fontsize=14)
+    plt.ylabel("Score", fontsize=14)
+    plt.title("TP/FP Classification Metrics Across Thresholds (Token Position)", fontsize=15)
+    plt.ylim(0, 1.05)
+    plt.legend(fontsize=12)
+    plt.tight_layout()
+    plt.savefig("classification_metrics_across_thresholds.png", dpi=140)
+    plt.show()
+
+
+thresholds, accs, recalls, precs, f1s = compute_metrics_across_thresholds(
+    results, start=5, end=165, step=5
+)
+plot_metrics(thresholds, accs, recalls, precs, f1s)
+
+
+
+
+def plot_roc_curve(results):
+    # Gather TP/FP token positions (using image modality as reference)
+    tp_positions = [p for p, _ in results["tp"]["image"]]
+    fp_positions = [p for p, _ in results["fp"]["image"]]
+
+    if not tp_positions or not fp_positions:
+        print("Warning: missing TP or FP positions for ROC curve.")
+        return
+
+    # Labels: TP=1, FP=0
+    y_true = np.array([1] * len(tp_positions) + [0] * len(fp_positions))
+    scores = np.array(tp_positions + fp_positions, dtype=float)
+
+    # We invert scores because smaller token positions → more TP-like
+    fpr, tpr, thresholds = roc_curve(y_true, -scores)
+    roc_auc = auc(fpr, tpr)
+
+    # Plot ROC curve
+    plt.figure(figsize=(7, 6))
+    plt.plot(fpr, tpr, color="tab:blue", lw=2, label="ROC curve")
+    plt.plot([0, 1], [0, 1], color="gray", lw=1.5, linestyle="--", label="Chance")
+    plt.xlabel("False Positive Rate", fontsize=13)
+    plt.ylabel("True Positive Rate", fontsize=13)
+    plt.title(f"ROC Curve for TP/FP Classification with Token Positions (AUROC = {roc_auc:.2f})", fontsize=14)
+    plt.legend(fontsize=11, loc="lower right")
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("roc_curve_tp_fp.png", dpi=140)
+    plt.show()
+
+    print(f"AUROC value: {roc_auc:.2f}")
+    return roc_auc
+
+
+roc_auc = plot_roc_curve(results)
