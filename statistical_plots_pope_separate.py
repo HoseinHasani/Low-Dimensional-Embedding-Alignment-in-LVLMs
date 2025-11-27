@@ -13,10 +13,13 @@ attn_dir = os.path.join(data_dir, "pope_llava_attentions_greedy_all_layers_top20
 resp_dir = os.path.join(data_dir, "pope_llava_responses_greedy_all_layers_top20_adversarial")
 gt_file = os.path.join(data_dir, "coco/coco_pope_adversarial.json")
 
+save_dir = "pope_statistical_heads"
+os.makedirs(save_dir, exist_ok=True)
+
 n_layers, n_heads = 32, 32
 n_top_k = 20
-eps = 1e-12
-n_select = 20  # number of most significant heads per category
+eps = 1e-50
+n_select = 20  
 sns.set(style="darkgrid")
 
 
@@ -163,7 +166,6 @@ def run_statistical_tests(metrics, group_type="yes"):
 
 
 def plot_selected_heads(metrics, selected, group_type, save_dir):
-    os.makedirs(save_dir, exist_ok=True)
     for (mname, l, h, logp) in selected:
         if group_type == "yes":
             a = metrics["TP"][mname][l][h]
@@ -181,24 +183,25 @@ def plot_selected_heads(metrics, selected, group_type, save_dir):
 
         plt.figure(figsize=(4, 4))
         plt.bar(labels, means, yerr=errors, color=colors, capsize=5)
+        y_max = np.max(means) + np.max(errors) + 1e-5
+        y_min = np.min(means) - np.max(errors) - 1e-5
+        plt.ylim(y_min, y_max)
+        
         plt.title(f"{group_type.upper()} | {mname.upper()} L{l+1}H{h+1}\nlog10(p)={logp:.2f}")
         plt.ylabel("Value")
         plt.tight_layout()
         plt.savefig(os.path.join(save_dir, f"{group_type}_{mname}_L{l}_H{h}_logp{logp:.1f}.png"), dpi=130)
         plt.close()
 
-if __name__ == "__main__":
-    files = glob(os.path.join(attn_dir, "attentions_*.pkl"))
-    metrics = aggregate_attention_data(files)
+files = glob(os.path.join(attn_dir, "attentions_*.pkl"))
+metrics = aggregate_attention_data(files)
 
-    # Run separate statistical tests for yes and no
-    yes_results = run_statistical_tests(metrics, group_type="yes")
-    no_results = run_statistical_tests(metrics, group_type="no")
+yes_results = run_statistical_tests(metrics, group_type="yes")
+no_results = run_statistical_tests(metrics, group_type="no")
 
-    # Select top-N most significant heads
-    selected_yes = yes_results[:n_select]
-    selected_no = no_results[:n_select]
+selected_yes = yes_results[:n_select]
+selected_no = no_results[:n_select]
 
-    save_dir = "pope_statistical_heads"
-    plot_selected_heads(metrics, selected_yes, "yes", os.path.join(save_dir, "yes_heads"))
-    plot_selected_heads(metrics, selected_no, "no", os.path.join(save_dir, "no_heads"))
+
+plot_selected_heads(metrics, selected_yes, "yes", os.path.join(save_dir, "yes_heads"))
+plot_selected_heads(metrics, selected_no, "no", os.path.join(save_dir, "no_heads"))
