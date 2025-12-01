@@ -4,10 +4,11 @@ import pickle
 from glob import glob
 from tqdm import tqdm
 import numpy as np
+from collections import defaultdict
 import joblib
 from scipy.stats import ttest_ind
-from collections import defaultdict
-from sklearn.linear_model import LogisticRegression
+# from sklearn.linear_model import LogisticRegression
+from sklearn.svm import LinearSVC as LogisticRegression
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import (
     accuracy_score,
@@ -28,24 +29,20 @@ class_zero = "tp"
 min_position = 5
 max_position = 150
 
-win_token = 10
+win_token = 20
 n_top_k = 20
-n_selected_heads = 3
+n_selected_heads = 7
 min_samples_per_class_window = 8
+
+max_iter = 10
 
 train_size = 0.75
 random_state = 42
-
-use_class_weight_balanced = True
-solver = "liblinear"
-max_iter = 200
 
 base_results_dir = "results_per_window"
 exp_name = f"linclf_win{win_token}_sel{n_selected_heads}_vs_{class_zero}"
 results_dir = os.path.join(base_results_dir, exp_name)
 os.makedirs(results_dir, exist_ok=True)
-
-fp_replication_factor = 1
 
 def extract_attention_values_from_file(data_dict, cls_, source="image"):
     out = []
@@ -62,6 +59,13 @@ def extract_attention_values_from_file(data_dict, cls_, source="image"):
         out.append((idx, topk_vals[..., :n_top_k].astype(float)))
     return out
 
+
+def compute_entropy(values, eps=1e-8):
+    if len(values) == 0:
+        return 0.0
+    prob = np.array(values, dtype=float)
+    prob = prob / (np.sum(prob, axis=-1, keepdims=True) + eps)
+    return -np.sum(prob * np.log(prob + eps), axis=-1)
 
 def collect_all_samples(files, class_zero, n_files=None):
     fps = []
@@ -80,7 +84,8 @@ def collect_all_samples(files, class_zero, n_files=None):
     def to_mean_list(samples):
         out = []
         for idx, arr in samples:
-            mean_arr = np.mean(arr, axis=-1)
+            # mean_arr = np.mean(arr, axis=-1)
+            mean_arr = compute_entropy(arr)
             out.append((int(idx), mean_arr.astype(float)))
         return out
 
@@ -143,124 +148,125 @@ def build_feature_matrix(arrs, selected_coords):
     return feats
 
 
-if __name__ == "__main__":
-    print("Collecting all fp and class_zero samples (means over top_k)...")
-    fps, zeros = collect_all_samples(files, class_zero)
+print("Collecting all fp and class_zero samples (means over top_k)...")
+fps, zeros = collect_all_samples(files, class_zero)
 
-    print(f"Total FP samples collected: {len(fps)}")
-    print(f"Total {class_zero} samples collected: {len(zeros)}")
+print(f"Total FP samples collected: {len(fps)}")
+print(f"Total {class_zero} samples collected: {len(zeros)}")
 
-    ranges = window_ranges(min_position, max_position, win_token)
-    print(f"Window ranges (start,end) to process: {ranges}")
+ranges = window_ranges(min_position, max_position, win_token)
+print(f"Window ranges (start,end) to process: {ranges}")
 
-    results = []
-    overall_metrics = defaultdict(list)
-    for (start, end) in ranges:
-        print(f"\nProcessing window [{start}, {end}] ...")
-        fp_arrs, fp_idxs = gather_window_samples(fps, start, end)
-        z_arrs, z_idxs = gather_window_samples(zeros, start, end)
+results = []
+overall_metrics = defaultdict(list)
+for (start, end) in ranges:
+    print(f"\nProcessing window [{start}, {end}] ...")
+    fp_arrs, fp_idxs = gather_window_samples(fps, start, end)
+    z_arrs, z_idxs = gather_window_samples(zeros, start, end)
 
-        n_fp = fp_arrs.shape[0]
-        n_z = z_arrs.shape[0]
-        print(f"  Samples in window: FP={n_fp}, {class_zero}={n_z}")
+    n_fp = fp_arrs.shape[0]
+    n_z = z_arrs.shape[0]
+    print(f"  Samples in window: FP={n_fp}, {class_zero}={n_z}")
 
-        if n_fp < min_samples_per_class_window or n_z < min_samples_per_class_window:
-            print(f"  Skipping window [{start},{end}] (not enough samples).")
-            results.append({
-                "start": start, "end": end, "n_fp": int(n_fp), f"n_{class_zero}": int(n_z),
-                "status": "skipped_not_enough_samples"
-            })
-            continue
+    if n_fp < min_samples_per_class_window or n_z < min_samples_per_class_window:
+        print(f"  Skipping window [{start},{end}] (not enough samples).")
+        results.append({
+            "start": start, "end": end, "n_fp": int(n_fp), f"n_{class_zero}": int(n_z),
+            "status": "skipped_not_enough_samples"
+        })
+        continue
 
-        pvals = perform_head_ttests(fp_arrs, z_arrs)
-        L, H = pvals.shape
-        flat_idx = np.argsort(pvals.flatten())[:n_selected_heads]
-        selected_coords = [(int(idx // H), int(idx % H)) for idx in flat_idx]
+    pvals = perform_head_ttests(fp_arrs, z_arrs)
+    L, H = pvals.shape
+    flat_idx = np.argsort(pvals.flatten())[:n_selected_heads]
+    selected_coords = [(int(idx // H), int(idx % H)) for idx in flat_idx]
 
-        X_fp = build_feature_matrix(fp_arrs, selected_coords)
-        X_z = build_feature_matrix(z_arrs, selected_coords)
-        y_fp = np.ones(X_fp.shape[0], dtype=int)
-        y_z = np.zeros(X_z.shape[0], dtype=int)
+    X_fp = build_feature_matrix(fp_arrs, selected_coords)
+    X_z = build_feature_matrix(z_arrs, selected_coords)
+    y_fp = np.ones(X_fp.shape[0], dtype=int)
+    y_z = np.zeros(X_z.shape[0], dtype=int)
 
-        X_all = np.vstack([X_fp, X_z])
-        y_all = np.concatenate([y_fp, y_z])
-        pos_all = np.array(fp_idxs + z_idxs)
+    X_all = np.vstack([X_fp, X_z])
+    y_all = np.concatenate([y_fp, y_z])
+    pos_all = np.array(fp_idxs + z_idxs)
 
-        try:
-            X_train, X_test, y_train, y_test, pos_train, pos_test = train_test_split(
-                X_all, y_all, pos_all, train_size=train_size, random_state=random_state, stratify=y_all
-            )
-        except ValueError:
-            X_train, X_test, y_train, y_test, pos_train, pos_test = train_test_split(
-                X_all, y_all, pos_all, train_size=train_size, random_state=random_state
-            )
-
-        if fp_replication_factor > 1:
-            fp_train_mask = (y_train == 1)
-            if fp_train_mask.sum() > 0:
-                X_fp_train = X_train[fp_train_mask]
-                y_fp_train = y_train[fp_train_mask]
-                pos_fp_train = pos_train[fp_train_mask]
-                X_train = np.vstack([X_train, np.repeat(X_fp_train, fp_replication_factor - 1, axis=0)])
-                y_train = np.concatenate([y_train, np.repeat(y_fp_train, fp_replication_factor - 1, axis=0)])
-                pos_train = np.concatenate([pos_train, np.repeat(pos_fp_train, fp_replication_factor - 1, axis=0)])
-
-            fp_test_mask = (y_test == 1)
-            if fp_test_mask.sum() > 0:
-                X_fp_test = X_test[fp_test_mask]
-                y_fp_test = y_test[fp_test_mask]
-                pos_fp_test = pos_test[fp_test_mask]
-                X_test = np.vstack([X_test, np.repeat(X_fp_test, fp_replication_factor - 1, axis=0)])
-                y_test = np.concatenate([y_test, np.repeat(y_fp_test, fp_replication_factor - 1, axis=0)])
-                pos_test = np.concatenate([pos_test, np.repeat(pos_fp_test, fp_replication_factor - 1, axis=0)])
-
-        scaler = StandardScaler()
-        scaler.fit(X_train)
-        X_train_s = scaler.transform(X_train)
-        X_test_s = scaler.transform(X_test)
-
-        clf = LogisticRegression(
-            penalty="l2",
-            solver=solver,
-            max_iter=max_iter,
-            class_weight="balanced" if use_class_weight_balanced else None,
+    try:
+        X_train, X_test, y_train, y_test, pos_train, pos_test = train_test_split(
+            X_all, y_all, pos_all, train_size=train_size, random_state=random_state, stratify=y_all
+        )
+    except ValueError:
+        X_train, X_test, y_train, y_test, pos_train, pos_test = train_test_split(
+            X_all, y_all, pos_all, train_size=train_size, random_state=random_state
         )
 
-        clf.fit(X_train_s, y_train)
-        y_pred = clf.predict(X_test_s)
-        y_pred_proba = clf.predict_proba(X_test_s)[:, 1]
+    # Dynamically adjust fp_replication_factor based on the proportions
+    class_0_train_size = np.sum(y_train == 0)
+    class_1_train_size = np.sum(y_train == 1)
+    fp_replication_factor_train = max(np.round(0.7*class_0_train_size / class_1_train_size), 1)
 
-        accuracy = accuracy_score(y_test, y_pred)
-        precision = precision_score(y_test, y_pred)
-        recall = recall_score(y_test, y_pred)
-        f1 = f1_score(y_test, y_pred)
+    class_0_test_size = np.sum(y_test == 0)
+    class_1_test_size = np.sum(y_test == 1)
+    fp_replication_factor_test = max(np.round(0.7*class_0_test_size / class_1_test_size), 1)
 
-        results.append({
-            "start": start,
-            "end": end,
-            "accuracy": accuracy,
-            "precision": precision,
-            "recall": recall,
-            "f1": f1,
-            "n_fp": int(n_fp),
-            f"n_{class_zero}": int(n_z),
-            "status": "success"
-        })
+    # Apply replication for training
+    if fp_replication_factor_train > 1:
+        fp_train_mask = (y_train == 1)
+        if fp_train_mask.sum() > 0:
+            X_fp_train = X_train[fp_train_mask]
+            y_fp_train = y_train[fp_train_mask]
+            pos_fp_train = pos_train[fp_train_mask]
+            X_train = np.vstack([X_train, np.repeat(X_fp_train, fp_replication_factor_train - 1, axis=0)])
+            y_train = np.concatenate([y_train, np.repeat(y_fp_train, fp_replication_factor_train - 1, axis=0)])
+            pos_train = np.concatenate([pos_train, np.repeat(pos_fp_train, fp_replication_factor_train - 1)])
 
-        overall_metrics["accuracy"].append(accuracy)
-        overall_metrics["precision"].append(precision)
-        overall_metrics["recall"].append(recall)
-        overall_metrics["f1"].append(f1)
+    # Apply replication for testing
+    if fp_replication_factor_test > 1:
+        fp_test_mask = (y_test == 1)
+        if fp_test_mask.sum() > 0:
+            X_fp_test = X_test[fp_test_mask]
+            y_fp_test = y_test[fp_test_mask]
+            pos_fp_test = pos_test[fp_test_mask]
+            X_test = np.vstack([X_test, np.repeat(X_fp_test, fp_replication_factor_test - 1, axis=0)])
+            y_test = np.concatenate([y_test, np.repeat(y_fp_test, fp_replication_factor_test - 1, axis=0)])
+            pos_test = np.concatenate([pos_test, np.repeat(pos_fp_test, fp_replication_factor_test - 1)])
 
-    with open(os.path.join(results_dir, "results.json"), "w") as f:
-        json.dump(results, f, indent=4)
+    # Scaling the features
+    scaler = StandardScaler()
+    X_train_s = scaler.fit_transform(X_train)
+    X_test_s = scaler.transform(X_test)
 
-    avg_metrics = {
-        metric: np.mean(values) for metric, values in overall_metrics.items()
-    }
+    # Train linear classifier
+    clf = LogisticRegression(max_iter=max_iter)
+    clf.fit(X_train_s, y_train)
+    y_pred = clf.predict(X_test_s)
+    # y_pred_proba = clf.predict_proba(X_test_s)[:, 1]
 
-    print(f"\nOverall Performance Metrics:")
-    for metric, avg in avg_metrics.items():
-        print(f"{metric.capitalize()}: {avg:.4f}")
+    accuracy = accuracy_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
+    f1 = f1_score(y_test, y_pred)
 
-    print(f"\nResults saved to: {os.path.join(results_dir, 'results.json')}")
+    results.append({
+        "start": start, "end": end, "accuracy": accuracy, "precision": precision,
+        "recall": recall, "f1": f1, "n_fp": int(n_fp), f"n_{class_zero}": int(n_z), "status": "success"
+    })
+    
+    print(f"acc: {accuracy}, f1: {f1}")
+    
+    overall_metrics["accuracy"].append(accuracy)
+    overall_metrics["precision"].append(precision)
+    overall_metrics["recall"].append(recall)
+    overall_metrics["f1"].append(f1)
+
+with open(os.path.join(results_dir, "results.json"), "w") as f:
+    json.dump(results, f, indent=4)
+
+avg_metrics = {
+    metric: np.mean(values) for metric, values in overall_metrics.items()
+}
+
+print(f"\nOverall Performance Metrics:")
+for metric, avg in avg_metrics.items():
+    print(f"{metric.capitalize()}: {avg:.4f}")
+
+print(f"\nResults saved to: {os.path.join(results_dir, 'results.json')}")
