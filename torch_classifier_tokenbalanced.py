@@ -19,6 +19,13 @@ from torch.utils.data import TensorDataset, DataLoader
 from collections import defaultdict
 
 
+sns.set_style('dark')
+# sns.set(rc={'figure.facecolor':'cornflowerblue'})
+# sns.set_context('notebook', font_scale=3.0, rc={'lines.linewidth': 3.0})
+sns.set_palette('bright')
+
+
+
 # -----------------------------
 # Configuration
 # -----------------------------
@@ -26,7 +33,7 @@ data_dir = "data/all layers all attention tp fp"
 base_save_dir = "tokenbalanced_results_all_layers"
 os.makedirs(base_save_dir, exist_ok=True)
 
-dataset_path = "cls_data__e_True_g_False"
+dataset_path = "cls_data"
 
 
 #######################
@@ -37,7 +44,7 @@ zero_class = 'both'
 
 
 balanced_train = True
-balanced_test = True
+balanced_test = False
 
 fp2tp_ratio = 0.8
 
@@ -58,7 +65,7 @@ elif zero_class == 'other':
     other_dropout = 0.0
     tp_dropout = 0.9
 else:
-    other_dropout = 0.0
+    other_dropout = 0.2
     tp_dropout = 0.0    
     
 use_text_attentions = False
@@ -71,7 +78,6 @@ n_subtokens = 1
 eps = 1e-10
 
 use_entropy = True
-use_gini = False
 
 n_epochs = 2
 weight_decay = 1e-3
@@ -79,7 +85,7 @@ dropout_rate = 0.5
 
 normalize_features = True
 
-exp_name = f"exp__ent{int(use_entropy)}_gin{int(use_gini)}_bal{int(balanced_train)}_zero_{zero_class}"
+exp_name = f"exp__trainb_{int(balanced_train)}_testb_{int(balanced_test)}_zero_{zero_class}"
 save_dir = os.path.join(base_save_dir, exp_name)
 model_dir = os.path.join(save_dir, "model")
 results_dir = os.path.join(save_dir, "results")
@@ -99,18 +105,6 @@ def compute_entropy(values):
     prob = np.array(values, dtype=float)
     prob = prob / (np.sum(prob, axis=-1, keepdims=True) + eps)
     return -np.sum(prob * np.log(prob + eps), axis=-1)
-
-
-def compute_gini(values):
-    if len(values) == 0:
-        return 0.0
-    prob = np.array(values, dtype=float)
-    prob = prob / (np.sum(prob, axis=-1, keepdims=True) + eps)
-    sorted_p = np.sort(prob, axis=-1)
-    n = sorted_p.shape[-1]
-    coef = 2 * np.arange(1, n + 1) - n - 1
-    gini = np.sum(coef * sorted_p, axis=-1) / (n * np.sum(sorted_p, axis=-1) + eps)
-    return np.abs(gini)
 
 
 def extract_attention_values(data_dict, cls_, source="image"):
@@ -168,8 +162,6 @@ def extract_all_features(files, n_files, n_layers, n_heads, min_position, max_po
                         features.append(mean_attention)
                         if use_entropy:
                             features.append(compute_entropy(vals))
-                        if use_gini:
-                            features.append(compute_gini(vals))
 
                 if use_text_attentions:
                     features.append(1.0 if src == "text" else 0.0)
@@ -271,6 +263,7 @@ def drop_samples(X, y, pos, cls, target="other", dropout_ratio=0.5):
 files = sorted(glob(os.path.join(data_dir, "attentions_*.pkl")))
 
 if dataset_path and os.path.exists(f"{dataset_path}/x.npy"):
+# if False:
     print("Loading saved dataset...")
     X_all = np.load(f"{dataset_path}/x.npy")
     y_all = np.load(f"{dataset_path}/y.npy")
@@ -282,7 +275,7 @@ else:
     )
 
     if X_all is not None:
-        dataset_path = f"cls_data__e_{use_entropy}_g_{use_gini}"
+        dataset_path = "cls_data"
         os.makedirs(dataset_path, exist_ok=True)
         np.save(os.path.join(dataset_path, "x.npy"), X_all)
         np.save(os.path.join(dataset_path, "y.npy"), y_all)
@@ -346,7 +339,7 @@ plt.plot(list(train_fp_factors.keys()), list(train_fp_factors.values()), 'o-', l
 # plt.plot(list(test_fp_factors.keys()), list(test_fp_factors.values()), 'x--', label="Test factors")
 plt.xlabel("Token Position")
 plt.ylabel("Adaptive FP Replication Factor")
-plt.title("Adaptive FP Replication per Token Position (win=5)")
+plt.title("Adaptive FP Replication per Token Position (win=5)", fontweight='bold')
 plt.legend()
 plt.grid(True, alpha=0.3)
 plt.tight_layout()
@@ -474,9 +467,9 @@ print(f"Accuracy:  {acc_global:.3f}")
 
 cm = confusion_matrix(y_true, y_pred)
 disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=["Non-FP", "FP"])
-plt.figure(figsize=(5, 5))
+plt.figure(figsize=(4, 4))
 disp.plot(cmap="Blues", values_format="d", colorbar=False)
-plt.title("Confusion Matrix (PyTorch MLP)")
+plt.title("Confusion Matrix (PyTorch MLP)", fontweight='bold')
 plt.tight_layout()
 plt.savefig(os.path.join(results_dir, "confusion_matrix_pytorch.png"), dpi=130)
 plt.close()
@@ -494,18 +487,33 @@ for true_label, predicted_label, cls in zip(y_true, y_pred, cls_test):
     col = predicted_label
     conf_matrix[row, col] += 1
 
+# Compute percentages (row-wise)
+conf_percent = conf_matrix / conf_matrix.sum(axis=1, keepdims=True)
+conf_percent = np.nan_to_num(conf_percent)  # avoid NaN if a row sums to zero
+
+# Combine counts + percentages in display text
+annot_text = np.empty_like(conf_matrix, dtype=object)
+for i in range(conf_matrix.shape[0]):
+    for j in range(conf_matrix.shape[1]):
+        count = conf_matrix[i, j]
+        pct = conf_percent[i, j] * 100
+        annot_text[i, j] = f"{pct:.1f}%"
+
+# Plot heatmap
 row_labels = ['FP', 'TP', 'Other']
 col_labels = ['Class 0', 'Class 1']
+
 plt.figure(figsize=(6, 4))
-sns.heatmap(conf_matrix, annot=True, fmt='d', cmap="Blues",
-            xticklabels=col_labels, yticklabels=row_labels, cbar=False)
-plt.title("Confusion Matrix (FP, TP, Other vs. Class 0/1)", fontsize=14)
+sns.heatmap(conf_matrix, annot=annot_text, fmt='', cmap="Blues",
+            xticklabels=col_labels, yticklabels=row_labels, cbar=False,
+            annot_kws={"fontsize": 10, "ha": "center", "va": "center"})
+
+plt.title("Confusion Matrix (FP, TP, Other vs. Predicted Labels)", fontsize=11, fontweight='bold')
 plt.xlabel('Predicted Labels', fontsize=12)
 plt.ylabel('True Labels', fontsize=12)
 plt.tight_layout()
-plt.savefig(os.path.join(results_dir, "confusion_matrix_fp_tp_other_seaborn.png"), dpi=130)
+plt.savefig(os.path.join(results_dir, "confusion_matrix_fp_tp_other_with_percentages.png"), dpi=300)
 plt.close()
-
 
 # Loss curves
 plt.figure(figsize=(8, 5))
@@ -514,7 +522,7 @@ plt.plot(test_losses, label="Val Loss")
 plt.xlabel("Epoch")
 plt.ylabel("Loss")
 plt.legend()
-plt.title("PyTorch MLP Training Loss")
+plt.title("PyTorch MLP Training Loss", fontweight='bold')
 plt.tight_layout()
 plt.savefig(os.path.join(results_dir, "training_loss_pytorch.png"), dpi=130)
 plt.close()
@@ -541,10 +549,11 @@ plt.plot(positions, accs, label="Accuracy")
 plt.plot(positions, precisions, label="Precision")
 plt.plot(positions, recalls, label="Recall")
 plt.plot(positions, f1s, label="F1-score")
+plt.xlim(8, 157)
 plt.xlabel("Token Position")
 plt.ylabel("Score")
 plt.legend()
-plt.title("Metrics by Token Position (PyTorch MLP)")
+plt.title("Metrics by Token Position")
 plt.tight_layout()
 plt.savefig(os.path.join(results_dir, "metrics_by_position_pytorch.png"), dpi=130)
 plt.close()
