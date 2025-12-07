@@ -36,7 +36,7 @@ os.makedirs(base_save_dir, exist_ok=True)
 dataset_path = "cls_data"
 
 #######################
-zero_class = 'both'
+zero_class = 'tp'
 balanced_train = False
 balanced_test = False
 fp2tp_ratio = 0.7
@@ -44,14 +44,15 @@ test_thresh = 0.5
 n_files = 3900
 train_size = 0.75
 test_size = 0.25
+pos_condition = False
 ###################
 
 if zero_class == 'tp':
-    other_dropout = 0.9
+    other_dropout = 0.95
     tp_dropout = 0.0
 elif zero_class == 'other':
     other_dropout = 0.0
-    tp_dropout = 0.9
+    tp_dropout = 0.95
 else:
     other_dropout = 0.2
     tp_dropout = 0.0    
@@ -70,7 +71,8 @@ weight_decay = 1e-3
 dropout_rate = 0.5
 normalize_features = True
 
-exp_name = f"exp__trainb_{int(balanced_train)}_testb_{int(balanced_test)}_zero_{zero_class}"
+sfx = "" if pos_condition else "__no_pos_condition"
+exp_name = f"exp__trainb_{int(balanced_train)}_testb_{int(balanced_test)}_zero_{zero_class}{sfx}"
 save_dir = os.path.join(base_save_dir, exp_name)
 model_dir = os.path.join(save_dir, "model")
 results_dir = os.path.join(save_dir, "results")
@@ -253,6 +255,9 @@ else:
         
 
 
+if pos_condition:
+    X_all = X_all[:, :-1]
+
 if other_dropout > 0:
     X_all, y_all, pos_all, cls_all = drop_samples(
         X_all, y_all, pos_all, cls_all, target="other", dropout_ratio=other_dropout
@@ -265,6 +270,7 @@ if tp_dropout > 0:
 # -----------------------------
 # Train/Test Split
 # -----------------------------
+
 n_total = len(X_all)
 n_train = int(n_total * train_size)
 n_test = int(n_total * test_size)
@@ -275,6 +281,8 @@ X_train, X_test = X_all[:n_train], X_all[-n_test:]
 y_train, y_test = y_all[:n_train], y_all[-n_test:]
 pos_train, pos_test = pos_all[:n_train], pos_all[-n_test:]
 cls_train, cls_test = cls_all[:n_train], cls_all[-n_test:]
+
+
 
 
 # -----------------------------
