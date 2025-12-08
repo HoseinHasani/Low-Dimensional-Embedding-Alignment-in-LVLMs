@@ -6,14 +6,16 @@ from glob import glob
 from tqdm import tqdm
 import seaborn as sns
 
+# ---------------- CONFIG ----------------
 data_dir = "data/all layers all attention tp fp"
 files = glob(os.path.join(data_dir, "attentions_*.pkl"))
-n_layers, n_heads = 32, 32          
-n_img_side = 24                     
-top_k = 5                            
+n_layers, n_heads = 32, 32           # as in your model
+n_img_side = 24                      # 24x24 = 576 visual tokens
+top_k = 2                            # <-- choose how many top positions to include
 n_files = len(files)
 sns.set(style="whitegrid")
 
+# ---------------- STEP 1: Extract top-k attended image positions ----------------
 def extract_topk_positions(data_dict, cls_, top_k):
     """Return list of (token_idx, topk_pos[l,h,top_k]) for one class (tp/fp/other)."""
     results = []
@@ -31,6 +33,7 @@ def extract_topk_positions(data_dict, cls_, top_k):
             results.append((token_idx, topk_inds))
     return results
 
+# ---------------- STEP 2: Aggregate across images ----------------
 def aggregate_topk_positions(files, n_files, top_k):
     tp, fp, oth = [], [], []
     for f in tqdm(files[:n_files]):
@@ -44,82 +47,78 @@ def aggregate_topk_positions(files, n_files, top_k):
         oth.extend(extract_topk_positions(data_dict, "other", top_k))
     return tp, fp, oth
 
-def compute_variance_by_layer(attn_data, n_layers, n_heads, n_img_side=24):
-
-    layer_token_positions = {l: [] for l in range(n_layers)}
-    layer_variances = {l: [] for l in range(n_layers)}
+# ---------------- STEP 3: Compute variance for each token position ----------------
+def compute_variance_for_token(attn_data, n_layers, n_heads, n_img_side=24, top_k=5):
+    """
+    attn_data: list of (token_idx, topk_indices[l,h,k])
+    Returns: variance across heads, layers, and top_k for all tokens
+    """
+    token_variances = {}
 
     for token_idx, topk_inds in attn_data:
         rows = topk_inds // n_img_side    # shape (n_layers, n_heads, top_k)
         cols = topk_inds % n_img_side
 
-        for l in range(n_layers):
-            # Flatten across heads and top_k
-            all_rows = rows[l].flatten()
-            all_cols = cols[l].flatten()
+        # Flatten across layers, heads, and top_k
+        all_rows = rows.flatten()
+        all_cols = cols.flatten()
 
-            row_var = np.var(all_rows)
-            col_var = np.var(all_cols)
-            total_var = row_var + col_var   # total 2D spatial dispersion
+        # Variance across all heads, top_k positions, and layers for this token
+        row_var = np.var(all_rows)
+        col_var = np.var(all_cols)
+        total_var = row_var + col_var  # total 2D spatial variance
 
-            layer_variances[l].append(total_var)
-            layer_token_positions[l].append(token_idx)
+        if token_idx not in token_variances:
+            token_variances[token_idx] = []
+        token_variances[token_idx].append(total_var)
 
-    return layer_token_positions, layer_variances
+    return token_variances
 
-def plot_combined_variance(tp_pos, tp_var, fp_pos, fp_var, oth_pos, oth_var, save_dir, top_k):
+# ---------------- STEP 4: Plot Variances ----------------
+def plot_variance_over_tokens(tp_variances, fp_variances, oth_variances, save_dir):
     os.makedirs(save_dir, exist_ok=True)
-    n_layers = len(tp_var)
 
-    for l in range(n_layers):
-        plt.figure(figsize=(9, 5))
+    # Prepare the variance data for plotting
+    token_ids = sorted(set(tp_variances.keys()) | set(fp_variances.keys()) | set(oth_variances.keys()))
+    
+    tp_values = [np.mean(tp_variances.get(token, [0])) for token in token_ids]
+    fp_values = [np.mean(fp_variances.get(token, [0])) for token in token_ids]
+    oth_values = [np.mean(oth_variances.get(token, [0])) for token in token_ids]
 
-        def layer_curve(layer_pos, layer_var):
-            if not layer_var[l]:
-                return None, None, None
-            x = np.array(layer_pos[l])
-            y = np.array(layer_var[l])
-            uniq_x = sorted(set(x))
-            mean_y = np.array([np.mean(y[x == pos]) for pos in uniq_x])
-            std_y = np.array([np.std(y[x == pos]) for pos in uniq_x])
-            return np.array(uniq_x), mean_y, std_y
+    # Compute standard deviation (error bars)
+    tp_std = [np.std(tp_variances.get(token, [0])) for token in token_ids]
+    fp_std = [np.std(fp_variances.get(token, [0])) for token in token_ids]
+    oth_std = [np.std(oth_variances.get(token, [0])) for token in token_ids]
 
-        tp_x, tp_y, tp_std = layer_curve(tp_pos, tp_var)
-        fp_x, fp_y, fp_std = layer_curve(fp_pos, fp_var)
-        oth_x, oth_y, oth_std = layer_curve(oth_pos, oth_var)
+    # Plotting the variances
+    plt.figure(figsize=(10, 6))
+    plt.errorbar(token_ids, tp_values, yerr=tp_std, label="tp", fmt='-o', color='b', capsize=5)
+    plt.errorbar(token_ids, fp_values, yerr=fp_std, label="fp", fmt='-o', color='r', capsize=5)
+    plt.errorbar(token_ids, oth_values, yerr=oth_std, label="other", fmt='-o', color='g', capsize=5)
 
-        # Plot with shaded error bars
-        def plot_with_std(x, y, std, color, label):
-            if x is None: return
-            plt.plot(x, y, color=color, lw=1.8, label=label)
-            plt.fill_between(x, y - std, y + std, color=color, alpha=0.2)
+    plt.xlim(4, 150)
+    
+    # Formatting plot
+    plt.title(f"Variance of Attention Concentration Over Token Positions", fontsize=15)
+    plt.xlabel("Token Position", fontsize=12)
+    plt.ylabel("Variance of Attended Positions", fontsize=12)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f"variance_over_tokens.png"), dpi=150)
+    plt.close()
 
-        plot_with_std(tp_x, tp_y, tp_std, "tab:green", "TP")
-        plot_with_std(fp_x, fp_y, fp_std, "tab:red", "FP")
-        plot_with_std(oth_x, oth_y, oth_std, "tab:gray", "Other")
-        
-        plt.xlim(4, 150)
-
-        plt.xlabel("Token Position in Generated Text", fontsize=13)
-        plt.ylabel("Variance of Attended Image Positions", fontsize=13)
-        plt.title(f"Layer {l+1} – Attention Concentration (top-{top_k})", fontsize=15)
-        plt.legend()
-        plt.grid(True, alpha=0.4)
-        plt.tight_layout()
-        plt.savefig(os.path.join(save_dir, f"layer_{l+1}_top{top_k}_tp_fp_other.png"), dpi=150)
-        plt.close()
-
+# ---------------- STEP 5: Run everything ----------------
 print(f"Extracting top-{top_k} attention positions from all files...")
 tp_data, fp_data, oth_data = aggregate_topk_positions(files, n_files, top_k)
 
-print("Computing variance across heads and top_k positions per layer...")
-tp_pos, tp_var = compute_variance_by_layer(tp_data, n_layers, n_heads)
-fp_pos, fp_var = compute_variance_by_layer(fp_data, n_layers, n_heads)
-oth_pos, oth_var = compute_variance_by_layer(oth_data, n_layers, n_heads)
+print("Computing variance for each token across layers, heads, and top_k positions...")
+tp_variances = compute_variance_for_token(tp_data, n_layers, n_heads)
+fp_variances = compute_variance_for_token(fp_data, n_layers, n_heads)
+oth_variances = compute_variance_for_token(oth_data, n_layers, n_heads)
 
-print("Plotting combined TP/FP/Other variance curves with STD bands...")
-save_dir = f"variance_plots_combined_top{top_k}_std"
-plot_combined_variance(tp_pos, tp_var, fp_pos, fp_var, oth_pos, oth_var, save_dir, top_k)
+print("Plotting variance over token positions...")
+save_dir = f"variance_plots_tokens_top{top_k}"
+plot_variance_over_tokens(tp_variances, fp_variances, oth_variances, save_dir)
 
-print(f"Done! Variance plots with STD saved in '{save_dir}/'")
+print(f"Done! Variance plot saved in '{save_dir}/'")
 
